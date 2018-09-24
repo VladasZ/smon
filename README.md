@@ -1,0 +1,3 @@
+# smon
+
+Minimalistic serial monitor.
