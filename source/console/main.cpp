@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <thread>
 
 #include "SerialMonitor.hpp"
 
@@ -10,6 +11,11 @@ SerialMonitor serial("/dev/cu.usbmodemFA131", 9600);
 
 int main() {
     
+
+    std::thread([]{
+        cout << "IZI ROUUDDD" << serial.readLine() << endl;
+        
+    }).detach();
     
     while (1)
     {
@@ -21,7 +27,6 @@ int main() {
         
         cout << "Cout " << message << endl;
 
-        cout << serial.readLine() << endl;
     }
     
     //cout << serial.readLine() << endl;

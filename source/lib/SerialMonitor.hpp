@@ -47,19 +47,13 @@ public:
         for(;;)
         {
             asio::read(serial,asio::buffer(&c,1));
-            switch(c)
-            {
-                    
-                    cout << c << endl;
-                    
-                case '\r':
-                    break;
-                case '\n':
-                    return result;
-                default:
-                    result+=c;
-            }
+            cout << c;
+            if (c == '\r')
+                continue;
+            result+=c;
         }
+        
+        return result;
     }
     
 private:
