@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 
 project(console)
 
+include(${CMAKE_BINARY_DIR}/conanbuildinfo_multi.cmake)
+conan_basic_setup()
+
 add_catalog_recursive(${PROJECT_SOURCE_DIR} / SOURCE)
 add_executable(${PROJECT_NAME} ${SOURCE})
 
 link_project(lib)
+
+conan_target_link_libraries(${PROJECT_NAME})
