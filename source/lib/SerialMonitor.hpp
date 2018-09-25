@@ -47,7 +47,7 @@ public:
         for(;;)
         {
             asio::read(serial,asio::buffer(&c,1));
-            cout << c;
+            cout << (uint8_t)c << endl;
             if (c == '\r')
                 continue;
             result+=c;

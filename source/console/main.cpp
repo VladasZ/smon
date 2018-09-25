@@ -6,28 +6,28 @@
 
 using namespace std;
 
-SerialMonitor serial("/dev/cu.usbmodemFA131", 9600);
+//SerialMonitor serial("/dev/cu.usbmodemFA131", 9600);
+SerialMonitor serial("COM10", 9600);
 
 
 int main() {
     
 
-    std::thread([]{
-        cout << "IZI ROUUDDD" << serial.readLine() << endl;
-        
-    }).detach();
+   // std::thread([]{
+		serial.readLine();
+  //  }).detach();
     
-    while (1)
-    {
-        string message;
-        
-        cin >> message;
-        
-        serial.writeString(message);
-        
-        cout << "Cout " << message << endl;
+    //while (1)
+    //{
+    //    string message;
+    //    
+    //    cin >> message;
+    //    
+    //    serial.writeString(message);
+    //    
+    //    cout << "Cout " << message << endl;
 
-    }
+    //}
     
     //cout << serial.readLine() << endl;
     
