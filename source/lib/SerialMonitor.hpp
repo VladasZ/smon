@@ -84,61 +84,6 @@ struct PulsePacket {
 	PulseBlock data[8];
 };
 
-class SerialMonitor {
-public:
-    /**
-     * Constructor.
-     * \param port device name, example "/dev/ttyUSB0" or "COM4"
-     * \param baud_rate communication speed, example 9600 or 115200
-     * \throws boost::system::system_error if cannot open the
-     * serial device
-     */
-    SerialMonitor(std::string port, unsigned int baud_rate)
-    : io(), serial(io, port)
-    {
-        serial.set_option(boost::asio::serial_port_base::baud_rate(baud_rate));
-    }
-    
-    /**
-     * Write a string to the serial device.
-     * \param s string to write
-     * \throws boost::system::system_error on failure
-     */
-    void writeString(std::string s)
-    {
-        boost::asio::write(serial,boost::asio::buffer(s.c_str(),s.size()));
-    }
-    
-    /**
-     * Blocks until a line is received from the serial device.
-     * Eventual '\n' or '\r\n' characters at the end of the string are removed.
-     * \return a string containing the received line
-     * \throws boost::system::system_error on failure
-     */
-
-	using DataPack = uint64_t;
-
-	static constexpr uint16_t PACKET_SIZE = sizeof(DataPack);
-
-	union Data {
-		uint8_t bytes[PACKET_SIZE];
-		DataPack number;
-	};
-
-    std::string readLine()
-    {
-		static uint16_t delays[20] = { 0 };
-
-		//std::thread([&] {
-		//	while (1)
-		//	{
-		//		std::this_thread::sleep_for(1s);
-		//		for (int i = 0; i < 20; i++)
-		//			cout << (uint64_t)delays[i] << " ";
-		//		cout << endl;
-		//	}
-		//}).detach();
-
 #define NUMBER true
 #define BYTES false
 #define SINGLE_BYTE false
@@ -146,73 +91,99 @@ public:
 #define PULSES false
 #define DELAY false
 
+using DataPack = uint64_t;
+
+static constexpr uint16_t PACKET_SIZE = sizeof(DataPack);
+
+union Data {
+	uint8_t bytes[PACKET_SIZE];
+	DataPack number;
+};
+
+Data data_buffer;
+uint8_t filled_bytes = 0;
+
+
+void process_byte(uint8_t byte) {
+#if SINGLE_BYTE
+	for (int i = 0; i < 8; i++)
+		cout << bool(byte & 1 << i);
+	cout << endl;
+#endif
+#if SINGLE_VALUE
+	cout << (uint64_t)byte << endl;
+#endif
+	if (filled_bytes < PACKET_SIZE)
+	{
+		data_buffer.bytes[filled_bytes] = byte;
+		filled_bytes++;
+	}
+	else
+	{
+
+#if NUMBER
+		cout <<
+			data_buffer.number
+			<< endl;
+#endif
+
+#if BYTES
+		for (int i = sizeof(DataPack) * 8 - 1; i >= 0; i--) {
+			cout << (bool)(data_buffer.number & (static_cast<DataPack>(1) << i));
+			if ((i) % 8 == 0)
+				cout << " ";
+		}
+		cout << endl;
+#endif
+
+#if PULSES
+		PulsePacket packet;
+		memcpy(&packet, &data.number, sizeof(PulsePacket));
+		for (int i = 0; i < PACKET_SIZE; i++)
+		{
+			cout << pulse_type_to_string[packet.data_buffer[i].first] << " ";
+			cout << pulse_type_to_string[packet.data_buffer[i].second] << " ";
+		}
+		cout << endl;
+#endif
+
+#if DELAY
+		auto delay = data.number - prev_value;
+		cout << delay << endl;
+		prev_value = data.number;
+#endif
+
+		data_buffer.number = 0;
+		filled_bytes = 0;
+	}
+}
+
+class SerialMonitor {
+public:
+
+    SerialMonitor(std::string port, unsigned int baud_rate)
+    : io(), serial(io, port)
+    {
+        serial.set_option(boost::asio::serial_port_base::baud_rate(baud_rate));
+    }
+
+    void writeString(std::string s)
+    {
+        boost::asio::write(serial,boost::asio::buffer(s.c_str(),s.size()));
+    }
+    
+    std::string readLine()
+    {
+		static uint16_t delays[20] = { 0 };
+
         using namespace boost;
 		uint8_t c;
         std::string result;
-		static uint8_t filled_bytes = 0;
 		static DataPack prev_value = 0;
         for(;;)
         {
             asio::read(serial,asio::buffer(&c,1));
-
-#if SINGLE_BYTE
-			for (int i = 0; i < 8; i++)
-				cout << bool(c & 1 << i);
-			cout << endl;
-#endif
-#if SINGLE_VALUE
-			cout << (uint64_t)c << endl;
-#endif
-
-			static Data data;
-
-			if (filled_bytes < PACKET_SIZE)
-			{
-				//cout << "byte n: " << (uint64_t)filled_bytes << " " << (uint64_t)c << " " << std::bitset<8>(c) << endl;
-				data.bytes[filled_bytes] = c;
-				filled_bytes++;
-			}
-			else
-			{
-
-#if NUMBER
-				cout <<
-					data.number// / 2000
-					<< endl;
-#endif
-
-#if BYTES
-				for (int i = sizeof(DataPack) * 8 - 1; i > 0; i--) {
-					cout << (bool)(data.number & (static_cast<DataPack>(1) << i));
-					if ((i) % 8 == 0)
-						cout << " ";
-				}
-				cout << endl;
-				cout << endl;
-#endif
-
-#if PULSES
-				PulsePacket packet;
-				memcpy(&packet, &data.number, sizeof(PulsePacket));
-				for (int i = 0; i < PACKET_SIZE; i++)
-				{
-					cout << pulse_type_to_string[packet.data[i].first] << " ";
-					cout << pulse_type_to_string[packet.data[i].second] << " ";
-				}
-				cout << endl;
-#endif
-
-#if DELAY
-				auto delay = data.number - prev_value;
-				cout << delay << endl;
-				prev_value = data.number;
-#endif
-		/*		if (delay < 200)
-					delays[delay]++;*/
-
-				data.number = 0;
-				filled_bytes = 0;
-			}
+			process_byte(c);
         }
 
         return result;
