@@ -1,9 +1,11 @@
 
 #pragma once
 
+#include <boost/asio.hpp>
+
+
 #include <string>
 #include <iostream>
-#include <boost/asio.hpp>
 #include <bitset>
 #include <map>
 
@@ -105,6 +107,7 @@ uint8_t filled_bytes = 0;
 
 
 void process_byte(uint8_t byte) {
+
 #if SINGLE_BYTE
 	for (int i = 0; i < 8; i++)
 		cout << bool(byte & 1 << i);
@@ -113,27 +116,22 @@ void process_byte(uint8_t byte) {
 #if SINGLE_VALUE
 	cout << (uint64_t)byte << endl;
 #endif
-	if (filled_bytes < PACKET_SIZE)
-	{
-		data_buffer.bytes[filled_bytes] = byte;
-		filled_bytes++;
-	}
-	else
-	{
 
+	data_buffer.bytes[filled_bytes++] = byte;
+
+	if (filled_bytes == PACKET_SIZE)
+	{
 #if NUMBER
-		cout <<
-			data_buffer.number
-			<< endl;
+		//pc.printf("%lu\n", data_buffer.number);
 #endif
 
 #if BYTES
 		for (int i = sizeof(DataPack) * 8 - 1; i >= 0; i--) {
-			cout << (bool)(data_buffer.number & (static_cast<DataPack>(1) << i));
+			pc.printf("%d", (bool)(data_buffer.number & (static_cast<DataPack>(1) << i)));
 			if ((i) % 8 == 0)
-				cout << " ";
+				pc.printf(" ");
 		}
-		cout << endl;
+		pc.printf("\n");
 #endif
 
 #if PULSES
@@ -155,7 +153,7 @@ void process_byte(uint8_t byte) {
 
 		data_buffer.number = 0;
 		filled_bytes = 0;
-	}
+		}
 }
 
 class SerialMonitor {
