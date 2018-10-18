@@ -7,4 +7,4 @@ set(CMAKE_CXX_STANDARD 17)
 project(smon)
 
 add_subdirectory(source/lib)
-add_subdirectory(source/console)
+add_subdirectory(source/smon)
