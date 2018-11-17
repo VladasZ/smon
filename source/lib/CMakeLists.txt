@@ -5,4 +5,8 @@ project(lib)
 add_catalog_recursive(${PROJECT_SOURCE_DIR} / SOURCE)
 add_library(${PROJECT_NAME} ${SOURCE})
 
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} wsock32 ws2_32)
+endif()
+
 conan_target_link_libraries(${PROJECT_NAME})

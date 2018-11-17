@@ -1,15 +1,21 @@
 
+#pragma comment(lib, "ws2_32")
+
 #include <iostream>
 #include <thread>
 
-#include <boost/filesystem.hpp>
+#include "SerialMonitor.hpp"
 
 using namespace std;
 
-int main() {
-  cout << "Hello spes" << endl;
 
-  cout << boost::filesystem::exists("spes") << endl;
+SerialMonitor smon("COM5", 250000);
+
+int main() {
   
-  return 0;
+	cout << "Helloy" << endl;
+
+	smon.readLine();
+
+	return 0;
 }

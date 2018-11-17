@@ -10,32 +10,75 @@
 #include <map>
 
 using namespace std;
-//
-//const PULSE = 40;
-//
-//const X0_LOW = 60;
-//const X0_HIGH = 72;
-//
-//const Y0_LOW = 71;
-//const Y0_HIGH = 82;
-//
-//const X1_LOW = 81;
-//const X1_HIGH = 92;
-//
-//const Y1_LOW = 91;
-//const Y1_HIGH = 102;
-//
-//const X0_SKIP_LOW = 101;
-//const X0_SKIP_HIGH = 114;
-//
-//const Y0_SKIP_LOW = 113;
-//const Y0_SKIP_HIGH = 124;
-//
-//const X1_SKIP_LOW = 123;
-//const X1_SKIP_HIGH = 135;
-//
-//const Y1_SKIP_LOW = 134;
-//const Y1_SKIP_HIGH = 148;
+
+#if ARM_CHIP
+
+#include "mbed.h"
+
+Serial pc(USBTX, USBRX); // tx, rx
+
+#define PRINT(val) pc.printf(val)
+#define PRINT_LU(val) pc.printf("%lu ", (val))
+#define PRINT_D(val) pc.printf("%d ", (val))
+#define PRINT_S(val) pc.printf("%s ", (val))
+#else
+#define PRINT(val) std::cout << (val)
+#define PRINT_LU(val) std::cout << " " << (*static_cast<uint64_t *>((uint64_t *)((void *)&val)))
+#define PRINT_D(val) std::cout << " " << (val)
+#define PRINT_S(val) std::cout << " " << (val)
+#endif
+
+#define NUMBER true
+#define BYTES false
+#define NUMS_4 false
+#define NUMS_8 false
+#define NUMS_16 false
+#define SINGLE_BYTE false
+#define SINGLE_VALUE false
+#define SINGLE_PULSE false
+#define PULSES false
+#define DELAY false
+#define GET_PACK false
+#define CHECK_SEQUENCE false
+#define REAL_AXIS false
+
+#define PACK_SIZE 16
+
+#define PART_SIZE 16
+#define PARTS_COUNT 4
+#define PACKET_SIZE (PART_SIZE * PARTS_COUNT) / 8
+
+int received = 0;
+
+#if !REAL_AXIS
+static bool axis;
+#endif
+
+class PulseData {
+	uint16_t _duration;
+public:
+	PulseData() = default;
+	PulseData(uint16_t data) : _duration(data) { }
+#if REAL_AXIS
+	bool axis() const { return _duration & 1 << 15; }
+#endif
+	bool station() const { return _duration & 1 << 14; }
+	uint16_t duration() const {
+		auto result = _duration;
+		result &= ~(1 << 15);
+		result &= ~(1 << 14);
+		return result;
+	}
+	std::string to_string() const {
+#if REAL_AXIS
+		return station_to_string(station()) + " " + axis_to_string(axis()) + " " + std::to_string(duration());
+#else
+		return station_to_string(station()) + " " + axis_to_string(axis) + " " + std::to_string(duration());
+#endif
+	}
+	static std::string axis_to_string(bool axis) { return axis ? "X" : "Y"; }
+	static std::string station_to_string(bool station) { return station ? "A" : "B"; }
+};
 
 enum class PulseType : uint8_t
 {
@@ -77,6 +120,16 @@ map<PulseType, string> simlpe_pulse_type_to_string = {
 	{ PulseType::laser , "laser" }
 };
 
+
+template <uint8_t size>
+class Base_DataPack {
+public:
+	char _data[size];
+	void clear() { memset(_data, 0, size); }
+};
+
+using DataPack = Base_DataPack<PACKET_SIZE * 8>;
+
 struct PulseBlock {
 	PulseType first : 4;
 	PulseType second : 4;
@@ -86,24 +139,32 @@ struct PulsePacket {
 	PulseBlock data[8];
 };
 
-#define NUMBER true
-#define BYTES false
-#define SINGLE_BYTE false
-#define SINGLE_VALUE false
-#define PULSES false
-#define DELAY false
-
-using DataPack = uint64_t;
-
-static constexpr uint16_t PACKET_SIZE = sizeof(DataPack);
-
 union Data {
 	uint8_t bytes[PACKET_SIZE];
+	uint16_t int16[PACKET_SIZE / 2];
+	PulseData pulses[PACKET_SIZE / 2];
+	uint64_t int64[PACKET_SIZE / 8];
 	DataPack number;
 };
 
+#if GET_PACK
+Data pack[PACK_SIZE];
+int pack_index = 0;
+#endif
+
 Data data_buffer;
-uint8_t filled_bytes = 0;
+
+struct
+{
+	bool transmission;
+	bool data;
+	bool _clock;
+	bool ok;
+	uint8_t number;
+	uint8_t filled_bytes = 0;
+	int bytes_count = 0;
+
+}test;
 
 
 void process_byte(uint8_t byte) {
@@ -113,36 +174,79 @@ void process_byte(uint8_t byte) {
 		cout << bool(byte & 1 << i);
 	cout << endl;
 #endif
+
 #if SINGLE_VALUE
 	cout << (uint64_t)byte << endl;
 #endif
 
-	data_buffer.bytes[filled_bytes++] = byte;
+	data_buffer.bytes[test.filled_bytes++] = byte;
 
-	if (filled_bytes == PACKET_SIZE)
+	if (test.filled_bytes == PACKET_SIZE)
 	{
+		//busy.write(1);
+
 #if NUMBER
-		//pc.printf("%lu\n", data_buffer.number);
+		PRINT_LU(data_buffer.number);
+		PRINT("\n");
 #endif
 
 #if BYTES
-		for (int i = sizeof(DataPack) * 8 - 1; i >= 0; i--) {
-			pc.printf("%d", (bool)(data_buffer.number & (static_cast<DataPack>(1) << i)));
-			if ((i) % 8 == 0)
-				pc.printf(" ");
+
+		for (int i = 0; i < PACKET_SIZE; i++) {
+			for (int j = 0; j < 8; j++) {
+				PRINT_D((bool)(data_buffer.bytes[i] & j));
+			}
+			PRINT(" ");
 		}
-		pc.printf("\n");
+		PRINT("\n");
+
+
+		//for (int i = sizeof(DataPack) * 8 - 1; i >= 0; i--) {
+		//	pc.printf("%d", (bool)(data_buffer.number & (static_cast<DataPack>(1) << i)));
+		//	if ((i) % 8 == 0)
+		//		pc.printf(" ");
+		//}
+		//pc.printf("\n");
+#endif
+
+#if NUMS_4
+		for (int i = 0; i < PACKET_SIZE; i++) {
+			PRINT_D(static_cast<uint8_t>(data_buffer.pulses[i].first));
+			PRINT_D(static_cast<uint8_t>(data_buffer.pulses[i].second));
+		}
+		PRINT("\n");
+#endif
+
+#if NUMS_8
+		for (int i = 0; i < PACKET_SIZE; i++) {
+			PRINT_D(static_cast<uint8_t>(data_buffer.bytes[i]));
+		}
+		PRINT("\n");
+#endif
+
+#if NUMS_16
+		for (int i = 0; i < PACKET_SIZE / 2; i++) {
+			auto result = data_buffer.int16[i];
+			result &= ~(1 << 15);
+			result &= ~(1 << 14);
+			PRINT_D(result);
+		}
+		PRINT("\n");
 #endif
 
 #if PULSES
-		PulsePacket packet;
-		memcpy(&packet, &data.number, sizeof(PulsePacket));
-		for (int i = 0; i < PACKET_SIZE; i++)
-		{
-			cout << pulse_type_to_string[packet.data_buffer[i].first] << " ";
-			cout << pulse_type_to_string[packet.data_buffer[i].second] << " ";
+		for (int i = 0; i < PACKET_SIZE / 2; i++) {
+#if !REAL_AXIS
+			axis = i % 2 == 0;
+#endif
+			PRINT_S(data_buffer.pulses[i].to_string().c_str());
 		}
-		cout << endl;
+		PRINT("\n");
+#endif
+
+#if SINGLE_PULSE
+		PRINT(pulse_type_to_string[static_cast<PulseType>(data_buffer.number)].c_str());
+		PRINT("\n");
 #endif
 
 #if DELAY
@@ -151,10 +255,37 @@ void process_byte(uint8_t byte) {
 		prev_value = data.number;
 #endif
 
-		data_buffer.number = 0;
-		filled_bytes = 0;
+#if GET_PACK
+
+		memcpy(&pack[pack_index++], &data_buffer.number, PACKET_SIZE);
+
+		if (pack_index == PACK_SIZE)
+		{
+			pack_index = 0;
+
+			for (int i = 0; i < PACK_SIZE; i++) {
+
+#if CHECK_SEQUENCE
+				/*	if (i > 0 && pack[i] != (pack[i - 1] + 1)) {
+						pc.printf("fail:\n");
+					}*/
+#endif
+
+				pc.printf("%d\n", pack->int64[0]);
+				pc.printf("%d\n", pack->int64[1]);
+			}
+
+			pc.printf("received:%d\n", received++);
 		}
+#endif
+
+		data_buffer.number.clear();
+		test.filled_bytes = 0;
+
+		//busy.write(0);
+	}
 }
+
 
 class SerialMonitor {
 public:
@@ -176,15 +307,13 @@ public:
 
         using namespace boost;
 		uint8_t c;
-        std::string result;
-		static DataPack prev_value = 0;
         for(;;)
         {
             asio::read(serial,asio::buffer(&c,1));
 			process_byte(c);
         }
 
-        return result;
+        return "";
     }
     
 private:
