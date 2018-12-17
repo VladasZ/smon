@@ -1,20 +1,14 @@
 cmake_minimum_required(VERSION 3.9.2 FATAL_ERROR)
 
-include(~/.emacs.d/utils/utils.cmake)
-
 include(${CMAKE_BINARY_DIR}/build_info.cmake)
 include(${CMAKE_BINARY_DIR}/${BUILD_INFO})
-
-set(CMAKE_CXX_STANDARD 17)
-
-include(~/.emacs.d/utils/utils.cmake)
-
-include(${CMAKE_BINARY_DIR}/build_info.cmake)
-include(${CMAKE_BINARY_DIR}/${BUILD_INFO})
+include(${BUILD_SCRIPT_PATH})
 
 set(CMAKE_CXX_STANDARD 17)
 
 project(smon)
+
+add_definitions(-DDEBUG=1)
 
 conan_basic_setup()
 
