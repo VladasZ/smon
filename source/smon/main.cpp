@@ -9,10 +9,10 @@
 using namespace std;
 
 
-SerialMonitor smon("COM5", 250000);
-
 int main() {
-  
+
+    SerialMonitor smon("COM5", 250000);
+
 	cout << "Helloy" << endl;
 
 	smon.readLine();
