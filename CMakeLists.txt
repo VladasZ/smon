@@ -14,3 +14,4 @@ conan_basic_setup()
 
 add_subdirectory(source/lib)
 add_subdirectory(source/smon)
+add_subdirectory(source/cpp_utils)

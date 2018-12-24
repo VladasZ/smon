@@ -1,6 +1,7 @@
 
 #pragma once
 
+
 #include <boost/asio.hpp>
 
 class SerialMonitor {
@@ -26,6 +27,7 @@ public:
         for(;;)
         {
             asio::read(serial,asio::buffer(&c,1));
+
 			//			process_byte(c);
         }
 

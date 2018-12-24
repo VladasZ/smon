@@ -11,7 +11,7 @@ using namespace std;
 
 int main() {
 
-    SerialMonitor smon("COM5", 250000);
+    SerialMonitor smon("/dev/ttyACM0", 250000);
 
 	cout << "Helloy" << endl;
 
