@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 
-project(lib)
+project(lib_smon)
 
 add_catalog_recursive(${PROJECT_SOURCE_DIR} / SOURCE)
 add_library(${PROJECT_NAME} ${SOURCE})

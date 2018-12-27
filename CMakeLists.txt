@@ -12,6 +12,6 @@ add_definitions(-DDEBUG=1)
 
 conan_basic_setup()
 
-add_subdirectory(source/lib)
+add_subdirectory(source/lib_smon)
 add_subdirectory(source/smon)
 add_subdirectory(source/cpp_utils)
