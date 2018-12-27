@@ -9,4 +9,6 @@ if(WIN32)
   target_link_libraries(${PROJECT_NAME} wsock32 ws2_32)
 endif()
 
+link_project(cpp_utils)
+
 conan_target_link_libraries(${PROJECT_NAME})

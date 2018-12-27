@@ -4,6 +4,10 @@
 
 #include <boost/asio.hpp>
 
+#include "Log.hpp"
+
+using namespace std;
+
 class SerialMonitor {
 public:
 
@@ -15,20 +19,21 @@ public:
 
     void writeString(std::string s)
     {
-        boost::asio::write(serial,boost::asio::buffer(s.c_str(),s.size()));
+        boost::asio::write(serial, boost::asio::buffer(s.c_str(),s.size()));
     }
     
     std::string readLine()
     {
-		static uint16_t delays[20] = { 0 };
-
         using namespace boost;
+
+        void* data = malloc(1000);
+
 		uint8_t c;
         for(;;)
         {
-            asio::read(serial,asio::buffer(&c,1));
+            asio::read(serial, asio::buffer(data,1000));
 
-			//			process_byte(c);
+            cout << static_cast<const char*>(data) << endl;
         }
 
         return "";

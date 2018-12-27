@@ -5,17 +5,30 @@
 #include <thread>
 
 #include "SerialMonitor.hpp"
+#include "ExceptionCatch.hpp"
+#include "Log.hpp"
 
 using namespace std;
 
 
 int main() {
 
-    SerialMonitor smon("/dev/ttyACM0", 250000);
+
+    cout << "Helloy1" << endl;
+
+
+    cout << "Helloy2" << endl;
+
+
+    SerialMonitor smon("/dev/ttyACM0", 57600);
+
+
+    smon.readLine();
+
+
 
 	cout << "Helloy" << endl;
 
-	smon.readLine();
 
 	return 0;
 }
