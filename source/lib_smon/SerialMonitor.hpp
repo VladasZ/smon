@@ -24,7 +24,7 @@ public:
     T get_data() {
         using namespace boost;
         static T value;
-        asio::read(serial, asio::buffer(static_cast<uint8_t*>(&value), sizeof(T)));
+        asio::read(serial, asio::buffer(reinterpret_cast<uint8_t*>(&value), sizeof(T)));
         return value;
     }
     
