@@ -14,4 +14,9 @@ conan_basic_setup()
 
 add_subdirectory(source/lib_smon)
 add_subdirectory(source/smon)
-add_subdirectory(source/cpp_utils)
+
+if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
+  foreach(var ${GIT_DEPENDENCIES})
+	add_subdirectory(${var})
+  endforeach()
+endif()
