@@ -29,7 +29,7 @@ public:
     }
     
     template <class T, class L>
-    std::string readLine(std::function<bool(L)> synchro, std::function<void(T)> callback) {
+    std::string readLine(std::function<bool(L)> synchro, [[maybe_unused]] std::function<void(T)> callback) {
         using namespace boost;
 
         static const auto l_size = sizeof(L);
