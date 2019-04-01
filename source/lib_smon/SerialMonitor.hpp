@@ -27,6 +27,12 @@ public:
         asio::read(serial, asio::buffer(reinterpret_cast<uint8_t*>(&value), sizeof(T)));
         return value;
     }
+
+    template<class T>
+    void get_data(T& value) {
+        using namespace boost;
+        asio::read(serial, asio::buffer(reinterpret_cast<uint8_t*>(&value), sizeof(T)));
+    }
     
     template <class T, class L>
     std::string readLine(std::function<bool(L)> synchro, [[maybe_unused]] std::function<void(T)> callback) {
