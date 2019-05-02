@@ -15,7 +15,7 @@ int main() {
 
     SerialMonitor smon("/dev/ttyACM0", 57600);
 
-    smon.readLine<int, int>([](auto){ return false; }, [](auto){});
+    smon.read_line<int, int>([](auto){ return false; }, [](auto){});
 
 	return 0;
 }

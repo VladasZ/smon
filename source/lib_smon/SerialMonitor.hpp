@@ -16,8 +16,8 @@ public:
         serial.set_option(boost::asio::serial_port_base::baud_rate(baud_rate));
     }
 
-    void writeString(std::string s) {
-        boost::asio::write(serial, boost::asio::buffer(s.c_str(),s.size()));
+    void write_string(std::string str) {
+        boost::asio::write(serial, boost::asio::buffer(str.c_str(), str.size()));
     }
 
     template<class T>
@@ -35,7 +35,7 @@ public:
     }
     
     template <class T, class L>
-    std::string readLine(std::function<bool(L)> synchro, [[maybe_unused]] std::function<void(T)> callback) {
+    std::string read_line(std::function<bool(L)> synchro, [[maybe_unused]] std::function<void(T)> callback) {
         using namespace boost;
 
         static const auto l_size = sizeof(L);
