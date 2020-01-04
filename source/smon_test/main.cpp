@@ -1,21 +1,17 @@
 
-#pragma comment(lib, "ws2_32")
-
-#include <iostream>
-#include <thread>
-
-#include "SerialMonitor.hpp"
-#include "ExceptionCatch.hpp"
-#include "Log.hpp"
-
-using namespace std;
-
+#include "Screen.hpp"
+#include "SmonTestView.hpp"
 
 int main() {
 
-    SerialMonitor smon("/dev/ttyACM0", 57600);
+    auto screen = new te::Screen({ 800, 680 });
+    auto view = new SmonTestView();
+    screen->set_view(view);
 
-    smon.read_line<int, int>([](auto){ return false; }, [](auto){});
+    view->label->set_text("Hello");
+    view->label->resize_to_fit_text();
+
+    screen->start_main_loop();
 
 	return 0;
 }
