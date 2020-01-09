@@ -1,60 +1,43 @@
 
 #pragma once
 
-#include <functional>
-
-#include <boost/asio.hpp>
-
 #include "Log.hpp"
 
-using namespace std;
-
 class SerialMonitor {
+
 public:
 
-    SerialMonitor(std::string port, unsigned int baud_rate) : io(), serial(io, port) {
-        serial.set_option(boost::asio::serial_port_base::baud_rate(baud_rate));
-    }
-
-    void write_string(std::string str) {
-        boost::asio::write(serial, boost::asio::buffer(str.c_str(), str.size()));
-    }
+    explicit SerialMonitor(const std::string& port, unsigned baud_rate = 230400);
+    ~SerialMonitor();
 
     template<class T>
-    T get_data() {
-        using namespace boost;
+    T& read() {
         static T value;
-        asio::read(serial, asio::buffer(reinterpret_cast<uint8_t*>(&value), sizeof(T)));
+        value = T { };
+        read(value);
         return value;
     }
 
     template<class T>
-    void get_data(T& value) {
-        using namespace boost;
-        asio::read(serial, asio::buffer(reinterpret_cast<uint8_t*>(&value), sizeof(T)));
+    void read(T& value) {
+        Logvar(sizeof(T));
+        _read(&value, sizeof(T));
     }
-    
-    template <class T, class L>
-    std::string read_line(std::function<bool(L)> synchro, [[maybe_unused]] std::function<void(T)> callback) {
-        using namespace boost;
 
-        static const auto l_size = sizeof(L);
-        static const auto t_size = sizeof(T);
-
-        uint8_t* buffer = static_cast<uint8_t*>(malloc(t_size));
-
-        L* header = reinterpret_cast<L*>(buffer);
-        T* data   = reinterpret_cast<T*>(buffer);
-
-        while(!synchro(*header) || true) {
-            asio::read(serial, asio::buffer(header, l_size));
-        }
-
-        return "";
+    template<class T>
+    void write(const T& value) {
+        _write(&value, sizeof(T));
     }
-    
+
+    std::string read_string();
+    void write_string(const std::string&);
+
 private:
-    boost::asio::io_service io;
-    boost::asio::serial_port serial;
-    
+
+    void* _serial;
+    void* _io;
+
+    void _read(void* buffer, unsigned size);
+    void _write(const void* buffer, unsigned size);
+
 };
