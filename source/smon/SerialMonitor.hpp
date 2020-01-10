@@ -20,7 +20,6 @@ public:
 
     template<class T>
     void read(T& value) {
-        Logvar(sizeof(T));
         _read(&value, sizeof(T));
     }
 
