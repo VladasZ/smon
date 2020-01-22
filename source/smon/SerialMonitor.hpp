@@ -7,7 +7,7 @@ class SerialMonitor {
 
 public:
 
-    explicit SerialMonitor(const std::string& port, unsigned baud_rate = 230400);
+    explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
     ~SerialMonitor();
 
     template<class T>
