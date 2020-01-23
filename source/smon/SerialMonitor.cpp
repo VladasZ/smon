@@ -33,6 +33,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
             mutex.lock();
             data_buffer[write_index++] = byte;
             unread_count++;
+            bytes_received++;
             if (write_index == data_buffer.size()) {
                 write_index = 0;
             }
@@ -45,6 +46,8 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 SerialMonitor::~SerialMonitor() {
     stop = true;
     mutex.lock();
+
+
     delete __SERIAL;
     delete __IO;
     mutex.unlock();
@@ -110,4 +113,5 @@ void SerialMonitor::_read(void* buf, unsigned size) {
 
 void SerialMonitor::_write(const void* buf, unsigned size) {
     asio::write(*__SERIAL, buffer(buf, size));
+    bytes_sent += size;
 }

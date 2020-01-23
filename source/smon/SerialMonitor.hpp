@@ -10,6 +10,9 @@ class SerialMonitor {
 
 public:
 
+    static inline unsigned bytes_received = 0;
+    static inline unsigned bytes_sent = 0;
+
     explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
     ~SerialMonitor();
 
