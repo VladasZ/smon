@@ -2,30 +2,60 @@
 #include <boost/asio.hpp>
 
 #include "SerialMonitor.hpp"
-#include "TimeoutSerial.hpp"
-#include "ExceptionCatch.hpp"
 
 using namespace std;
 using namespace boost;
 using namespace boost::asio;
 
-#define __SERIAL static_cast<serial_port*>(_serial)
-#define __IO static_cast<io_service*>(_io)
+#define __SERIAL static_cast<serial_port*>(serial)
+#define __IO static_cast<io_service*>(io)
 
-static TimeoutSerial* _serrr;
+static bool stop = false;
 
 SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
-//    _io = new io_service();
-//    _serial = new serial_port(*__IO, port);
-//    __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
+    stop = false;
+    io = new io_service();
+    serial = new serial_port(*__IO, port);
+    __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
 
-    _serrr = new TimeoutSerial(port, baud_rate);
-    _serrr->setTimeout(boost::posix_time::milliseconds(10));
+    std::thread([&] {
+
+        while(true) {
+
+            if (stop) {
+                return;
+            }
+
+            static uint8_t byte;
+            asio::read(*__SERIAL, buffer(&byte, 1));
+            Logvar(static_cast<int>(byte));
+
+            mutex.lock();
+            data_buffer[write_index++] = byte;
+            unread_count++;
+            if (write_index == data_buffer.size()) {
+                write_index = 0;
+            }
+            mutex.unlock();
+        }
+
+    }).detach();
 }
 
 SerialMonitor::~SerialMonitor() {
+    stop = true;
+    mutex.lock();
     delete __SERIAL;
     delete __IO;
+    mutex.unlock();
+}
+
+bool SerialMonitor::has_data() {
+    bool result = false;
+    mutex.lock();
+    result = unread_count > 0;
+    mutex.unlock();
+    return result;
 }
 
 std::string SerialMonitor::read_string() {
@@ -47,14 +77,37 @@ void SerialMonitor::write_string(const string& str) {
 }
 
 void SerialMonitor::_read(void* buf, unsigned size) {
-    try {
-        _serrr->read(static_cast<char*>(buf), size);
+    mutex.lock();
+    if (unread_count == 0) {
+        mutex.unlock();
+        return;
     }
-    catch (...) {
-        Log(what());
+    // Logvar(size);
+    // Logvar(unread_count);
+    if (unread_count < size) {
+        Log("Not enough data in buffer");
+        memset(buf, 0, size);
+        mutex.unlock();
+        return;
     }
+    if (read_index + size < buffer_size) {
+        memcpy(buf, &data_buffer[read_index], size);
+        unread_count -= size;
+        read_index += size;
+        if (read_index == data_buffer.size()) {
+            read_index = 0;
+        }
+    }
+    else {
+        Log("IMPLEMENT");
+        read_index = 0;
+        write_index = 0;
+        unread_count = 0;
+        memset(buf, 0, size);
+    }
+    mutex.unlock();
 }
 
 void SerialMonitor::_write(const void* buf, unsigned size) {
-    _serrr->write(static_cast<const char*>(buf), size);
+    asio::write(*__SERIAL, buffer(buf, size));
 }
