@@ -18,36 +18,34 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     serial = new serial_port(*__IO, port);
     __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
 
-//    std::thread([&] {
-//
-//        while(true) {
-//
-//            if (stop) {
-//                return;
-//            }
-//
-//            static uint8_t byte;
-//            asio::read(*__SERIAL, buffer(&byte, 1));
-//            Logvar(static_cast<int>(byte));
-//
-//            mutex.lock();
-//            data_buffer[write_index++] = byte;
-//            unread_count++;
-//            bytes_received++;
-//            if (write_index == data_buffer.size()) {
-//                write_index = 0;
-//            }
-//            mutex.unlock();
-//        }
-//
-//    }).detach();
+    std::thread([&] {
+
+        while(true) {
+
+            if (stop) {
+                return;
+            }
+
+            static uint8_t byte;
+            asio::read(*__SERIAL, buffer(&byte, 1));
+            Logvar(static_cast<int>(byte));
+
+            mutex.lock();
+            data_buffer[write_index++] = byte;
+            unread_count++;
+            bytes_received++;
+            if (write_index == data_buffer.size()) {
+                write_index = 0;
+            }
+            mutex.unlock();
+        }
+
+    }).detach();
 }
 
 SerialMonitor::~SerialMonitor() {
     stop = true;
     mutex.lock();
-
-
     delete __SERIAL;
     delete __IO;
     mutex.unlock();
@@ -61,26 +59,8 @@ bool SerialMonitor::has_data() {
     return true;
 }
 
-std::string SerialMonitor::read_string() {
-    static char buffer[1024];
-
-    for (int i = 0; i < 1024; i++) {
-        auto letter = read<char>();
-        buffer[i] = letter;
-        if (letter == '\n') {
-            break;
-        }
-    }
-
-    return buffer;
-}
-
-void SerialMonitor::write_string(const string& str) {
-    _write(str.c_str(), str.size());
-}
-
 void SerialMonitor::_read(void* buf, unsigned size) {
-    asio::read(*__SERIAL, buffer(buf, size));
+  //  asio::read(*__SERIAL, buffer(buf, size));
 
 //
 //    mutex.lock();

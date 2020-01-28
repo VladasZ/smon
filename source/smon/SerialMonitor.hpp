@@ -38,9 +38,6 @@ public:
 
     void reset();
 
-    std::string read_string();
-    void write_string(const std::string&);
-
 private:
 
     std::mutex mutex;
