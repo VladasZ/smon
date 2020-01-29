@@ -43,8 +43,6 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
                 DataPacket packet;
                 packet.size = header.size;
 
-                Logvar(header.size);
-
                 for (unsigned i = 0; i < header.size; i++) {
                     asio::read(*__SERIAL, buffer(&byte, 1));
                     packet.data[i]  = byte;
@@ -52,18 +50,9 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 
                 mutex.lock();
                 received_packets.push_back(packet);
-                Log("Packet ready");
                 mutex.unlock();
             }
 
-//            mutex.lock();
-//            data_buffer[write_index++] = byte;
-//            unread_count++;
-//            bytes_received++;
-//            if (write_index == data_buffer.size()) {
-//                write_index = 0;
-//            }
-//            mutex.unlock();
         }
 
     }).detach();
@@ -95,9 +84,6 @@ void SerialMonitor::_read(void* buf, unsigned size) {
     }
 
     auto& packet = received_packets.back();
-
-    Logvar(packet.size);
-    Logvar(size);
 
     if (packet.size != size) {
         mutex.unlock();
