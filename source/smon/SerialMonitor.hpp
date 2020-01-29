@@ -1,58 +1,68 @@
 
 #pragma once
 
+#include <list>
 #include <array>
 #include <thread>
 
 #include "Log.hpp"
+#include "DataPacket.hpp"
 
-class SerialMonitor {
+namespace smon {
 
-public:
+    class SerialMonitor {
 
-    static inline unsigned bytes_received = 0;
-    static inline unsigned bytes_sent = 0;
+    public:
 
-    explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
-    ~SerialMonitor();
+        static inline unsigned bytes_received = 0;
+        static inline unsigned bytes_sent = 0;
 
-    template<class T>
-    T& read() {
-        static T value;
-        value = T { };
-        read(value);
-        return value;
-    }
+        explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
 
-    template<class T>
-    void read(T& value) {
-        _read(&value, sizeof(T));
-    }
+        ~SerialMonitor();
 
-    template<class T>
-    void write(const T& value) {
-        _write(&value, sizeof(T));
-    }
+        template<class T>
+        T& read() {
+            static T value;
+            value = T{};
+            read(value);
+            return value;
+        }
 
-    bool has_data();
+        template<class T>
+        void read(T& value) {
+            _read(&value, sizeof(T));
+        }
 
-    void reset();
+        template<class T>
+        void write(const T& value) {
+            _write(&value, sizeof(T));
+        }
 
-private:
+        bool has_data();
 
-    std::mutex mutex;
+        void reset();
 
-    void* serial;
-    void* io;
+    private:
 
-    static constexpr auto buffer_size = 2048;
-    unsigned unread_count = 0;
-    unsigned read_index = 0;
-    unsigned write_index = 0;
+        std::mutex mutex;
 
-    std::array<uint8_t, buffer_size> data_buffer;
+        void* serial;
+        void* io;
 
-    void _read(void* buffer, unsigned size);
-    void _write(const void* buffer, unsigned size);
+        static constexpr auto buffer_size = 2048;
+        unsigned unread_count = 0;
+        unsigned read_index = 0;
+        unsigned write_index = 0;
 
-};
+        std::array<uint8_t, buffer_size> data_buffer;
+
+        std::list<DataPacket> received_packets;
+
+        void _read(void* buffer, unsigned size);
+
+        void _write(const void* buffer, unsigned size);
+
+    };
+
+}

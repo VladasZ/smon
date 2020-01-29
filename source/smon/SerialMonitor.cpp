@@ -1,11 +1,17 @@
 
 #include <boost/asio.hpp>
 
+#include "Header.hpp"
+#include "DataPacket.hpp"
 #include "SerialMonitor.hpp"
+
+using namespace cu;
 
 using namespace std;
 using namespace boost;
 using namespace boost::asio;
+
+using namespace smon;
 
 #define __SERIAL static_cast<serial_port*>(serial)
 #define __IO static_cast<io_service*>(io)
@@ -26,18 +32,38 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
                 return;
             }
 
+            static Header header;
+
             static uint8_t byte;
             asio::read(*__SERIAL, buffer(&byte, 1));
-            Logvar(static_cast<int>(byte));
+            header.add_byte(byte);
 
-            mutex.lock();
-            data_buffer[write_index++] = byte;
-            unread_count++;
-            bytes_received++;
-            if (write_index == data_buffer.size()) {
-                write_index = 0;
+            if (header.is_valid()) {
+
+                DataPacket packet;
+                packet.size = header.size;
+
+                Logvar(header.size);
+
+                for (unsigned i = 0; i < header.size; i++) {
+                    asio::read(*__SERIAL, buffer(&byte, 1));
+                    packet.data[i]  = byte;
+                }
+
+                mutex.lock();
+                received_packets.push_back(packet);
+                Log("Packet ready");
+                mutex.unlock();
             }
-            mutex.unlock();
+
+//            mutex.lock();
+//            data_buffer[write_index++] = byte;
+//            unread_count++;
+//            bytes_received++;
+//            if (write_index == data_buffer.size()) {
+//                write_index = 0;
+//            }
+//            mutex.unlock();
         }
 
     }).detach();
@@ -60,38 +86,32 @@ bool SerialMonitor::has_data() {
 }
 
 void SerialMonitor::_read(void* buf, unsigned size) {
-  //  asio::read(*__SERIAL, buffer(buf, size));
+    mutex.lock();
 
-//
-//    mutex.lock();
-//    if (unread_count == 0) {
-//        mutex.unlock();
-//        return;
-//    }
-//    // Logvar(size);
-//    // Logvar(unread_count);
-//    if (unread_count < size) {
-//        Log("Not enough data in buffer");
-//        memset(buf, 0, size);
-//        mutex.unlock();
-//        return;
-//    }
-//    if (read_index + size < buffer_size) {
-//        memcpy(buf, &data_buffer[read_index], size);
-//        unread_count -= size;
-//        read_index += size;
-//        if (read_index == data_buffer.size()) {
-//            read_index = 0;
-//        }
-//    }
-//    else {
-//        Log("IMPLEMENT");
-//        read_index = 0;
-//        write_index = 0;
-//        unread_count = 0;
-//        memset(buf, 0, size);
-//    }
-//    mutex.unlock();
+    if (received_packets.size() == 0) {
+        mutex.unlock();
+        Log("No packets");
+        return;
+    }
+
+    auto& packet = received_packets.back();
+
+    Logvar(packet.size);
+    Logvar(size);
+
+    if (packet.size != size) {
+        mutex.unlock();
+        Log("Invalid packet");
+        return;
+    }
+
+    memcpy(buf, &packet.data[0], size);
+
+    received_packets.pop_back();
+
+    mutex.unlock();
+
+    return;
 }
 
 void SerialMonitor::_write(const void* buf, unsigned size) {

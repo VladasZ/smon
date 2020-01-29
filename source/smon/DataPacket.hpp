@@ -1,0 +1,25 @@
+//
+//  DataPacket.hpp
+//  smon
+//
+//  Created by Vladas Zakrevskis on 29/01/20.
+//  Copyright © 2020 VladasZ. All rights reserved.
+//
+
+#pragma once
+
+#include <array>
+
+namespace smon {
+
+    class DataPacket {
+
+    public:
+
+        unsigned size;
+
+        std::array<uint8_t, 256> data;
+
+    };
+
+}
