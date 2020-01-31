@@ -4,6 +4,9 @@
 #include "Header.hpp"
 #include "DataPacket.hpp"
 #include "SerialMonitor.hpp"
+#include "ExceptionCatch.hpp"
+
+#define SMON_IGNORE_CONNECTION_ERRORS
 
 using namespace cu;
 
@@ -17,12 +20,21 @@ using namespace smon;
 #define __IO static_cast<io_service*>(io)
 
 static bool stop = false;
+static bool failed_init = false;
 
 SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     stop = false;
     io = new io_service();
-    serial = new serial_port(*__IO, port);
-    __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
+
+    try {
+        serial = new serial_port(*__IO, port);
+        __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
+    }
+    catch(...) {
+        Log(what());
+        failed_init = true;
+        return ;
+    }
 
     std::thread([&] {
 
@@ -59,6 +71,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 }
 
 SerialMonitor::~SerialMonitor() {
+    if (failed_init) return;
     stop = true;
     mutex.lock();
     delete __SERIAL;
@@ -67,14 +80,13 @@ SerialMonitor::~SerialMonitor() {
 }
 
 bool SerialMonitor::has_data() {
-//    bool result = false;
-//    mutex.lock();
-//    result = unread_count > 0;
-//    mutex.unlock();
-    return true;
+    return !received_packets.empty();
 }
 
 void SerialMonitor::_read(void* buf, unsigned size) {
+
+    if (failed_init) return;
+
     mutex.lock();
 
     if (received_packets.size() == 0) {
@@ -101,6 +113,7 @@ void SerialMonitor::_read(void* buf, unsigned size) {
 }
 
 void SerialMonitor::_write(const void* buf, unsigned size) {
+    if (failed_init) return;
     asio::write(*__SERIAL, buffer(buf, size));
     bytes_sent += size;
 }
