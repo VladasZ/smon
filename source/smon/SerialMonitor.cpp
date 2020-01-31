@@ -6,7 +6,7 @@
 #include "SerialMonitor.hpp"
 #include "ExceptionCatch.hpp"
 
-#define SMON_IGNORE_CONNECTION_ERRORS
+//#define SMON_IGNORE_CONNECTION_ERRORS
 
 using namespace cu;
 
@@ -32,8 +32,12 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     }
     catch(...) {
         Log(what());
+#ifdef SMON_IGNORE_CONNECTION_ERRORS
         failed_init = true;
-        return ;
+        return;
+#else
+        Fatal(what());
+#endif
     }
 
     std::thread([&] {
@@ -71,7 +75,9 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 }
 
 SerialMonitor::~SerialMonitor() {
+#ifdef SMON_IGNORE_CONNECTION_ERRORS
     if (failed_init) return;
+#endif
     stop = true;
     mutex.lock();
     delete __SERIAL;
@@ -85,7 +91,9 @@ bool SerialMonitor::has_data() {
 
 void SerialMonitor::_read(void* buf, unsigned size) {
 
+#ifdef SMON_IGNORE_CONNECTION_ERRORS
     if (failed_init) return;
+#endif
 
     mutex.lock();
 
@@ -113,7 +121,9 @@ void SerialMonitor::_read(void* buf, unsigned size) {
 }
 
 void SerialMonitor::_write(const void* buf, unsigned size) {
+#ifdef SMON_IGNORE_CONNECTION_ERRORS
     if (failed_init) return;
+#endif
     asio::write(*__SERIAL, buffer(buf, size));
     bytes_sent += size;
 }
