@@ -6,7 +6,7 @@
 #include "SerialMonitor.hpp"
 #include "ExceptionCatch.hpp"
 
-//#define SMON_IGNORE_CONNECTION_ERRORS
+#define SMON_DONT_THROW_ON_CONNECTION_ERRORS
 
 using namespace cu;
 
@@ -20,7 +20,6 @@ using namespace smon;
 #define __IO static_cast<io_service*>(io)
 
 static bool stop = false;
-static bool failed_init = false;
 
 SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     stop = false;
@@ -32,7 +31,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     }
     catch(...) {
         Log(what());
-#ifdef SMON_IGNORE_CONNECTION_ERRORS
+#ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
         failed_init = true;
         return;
 #else
@@ -75,7 +74,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 }
 
 SerialMonitor::~SerialMonitor() {
-#ifdef SMON_IGNORE_CONNECTION_ERRORS
+#ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
     if (failed_init) return;
 #endif
     stop = true;
@@ -91,7 +90,7 @@ bool SerialMonitor::has_data() {
 
 void SerialMonitor::_read(void* buf, unsigned size) {
 
-#ifdef SMON_IGNORE_CONNECTION_ERRORS
+#ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
     if (failed_init) return;
 #endif
 
@@ -121,7 +120,7 @@ void SerialMonitor::_read(void* buf, unsigned size) {
 }
 
 void SerialMonitor::_write(const void* buf, unsigned size) {
-#ifdef SMON_IGNORE_CONNECTION_ERRORS
+#ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
     if (failed_init) return;
 #endif
     asio::write(*__SERIAL, buffer(buf, size));

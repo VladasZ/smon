@@ -17,6 +17,8 @@ namespace smon {
         static inline unsigned bytes_received = 0;
         static inline unsigned bytes_sent = 0;
 
+        bool failed_init = false;
+
         explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
 
         ~SerialMonitor();
