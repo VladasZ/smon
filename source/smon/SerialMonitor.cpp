@@ -57,7 +57,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 
                 DataPacket packet;
                 packet.size = header.size;
-
+               // Logvar(packet.size);
                 for (unsigned i = 0; i < header.size; i++) {
                     asio::read(*__SERIAL, buffer(&byte, 1));
                     packet.data[i]  = byte;
@@ -102,17 +102,21 @@ void SerialMonitor::_read(void* buf, unsigned size) {
         return;
     }
 
-    auto& packet = received_packets.back();
+    auto packet_iterator = std::find_if(received_packets.begin(), received_packets.end(), [&](const DataPacket& packet) {
+        return packet.size == size;
+    });
 
-    if (packet.size != size) {
+    if (packet_iterator == received_packets.end()) {
         mutex.unlock();
         Log("Invalid packet");
         return;
     }
 
+    DataPacket& packet = *packet_iterator;
+
     memcpy(buf, &packet.data[0], size);
 
-    received_packets.pop_back();
+    received_packets.erase(packet_iterator);
 
     mutex.unlock();
 
@@ -123,6 +127,8 @@ void SerialMonitor::_write(const void* buf, unsigned size) {
 #ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
     if (failed_init) return;
 #endif
+    mutex.lock();
     asio::write(*__SERIAL, buffer(buf, size));
     bytes_sent += size;
+    mutex.unlock();
 }
