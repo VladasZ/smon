@@ -7,6 +7,7 @@
 
 #include "Log.hpp"
 #include "DataBuffer.hpp"
+#include "DataPacket.hpp"
 
 namespace smon {
 
@@ -33,7 +34,12 @@ namespace smon {
 
         template<class T>
         void read(T& value) {
-            _read(&value, sizeof(T));
+            if constexpr (cu::is_data_v<T>) {
+                _read(&value, sizeof(T), T::packet_id);
+            }
+            else {
+                _read(&value, sizeof(T));
+            }
         }
 
         template<class T>
@@ -61,7 +67,7 @@ namespace smon {
 
         std::list<DataBuffer> received_packets;
 
-        void _read(void* buffer, unsigned size);
+        void _read(void* buffer, unsigned size, uint16_t id = -1);
 
         void _write(const void* buffer, unsigned size);
 

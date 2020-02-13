@@ -55,7 +55,8 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
             if (header.is_valid()) {
                 DataBuffer packet;
                 packet.size = header.size;
-               // Logvar(packet.size);
+                packet.packet_id = header.packet_id;
+                // Logvar(packet.size);
                 for (unsigned i = 0; i < header.size; i++) {
                     asio::read(*__SERIAL, buffer(&byte, 1));
                     packet.data[i]  = byte;
@@ -86,11 +87,15 @@ bool SerialMonitor::has_data() {
     return !received_packets.empty();
 }
 
-void SerialMonitor::_read(void* buf, unsigned size) {
+void SerialMonitor::_read(void* buf, unsigned size, uint16_t id) {
 
 #ifdef SMON_DONT_THROW_ON_CONNECTION_ERRORS
     if (failed_init) return;
 #endif
+
+    if (id == -1) {
+        Fatal("Not implemented yet");
+    }
 
     mutex.lock();
 
@@ -100,21 +105,25 @@ void SerialMonitor::_read(void* buf, unsigned size) {
         return;
     }
 
-    auto packet_iterator = std::find_if(received_packets.begin(), received_packets.end(), [&](const DataBuffer& packet) {
-        return packet.size == size;
+    DataBuffer* packet_ptr = nullptr;
+
+    auto matched_packet = std::find_if(received_packets.begin(), received_packets.end(), [&](const DataBuffer& packet) {
+        return packet.packet_id == id;
     });
 
-    if (packet_iterator == received_packets.end()) {
+    if (matched_packet == received_packets.end()) {
         mutex.unlock();
         Log("Invalid packet");
         return;
     }
 
-    DataBuffer& packet = *packet_iterator;
+    packet_ptr = &(*matched_packet);
+
+    DataBuffer& packet = *matched_packet;
 
     memcpy(buf, &packet.data[0], size);
 
-    received_packets.erase(packet_iterator);
+    received_packets.erase(matched_packet);
 
     mutex.unlock();
 

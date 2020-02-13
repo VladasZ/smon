@@ -17,6 +17,7 @@ namespace smon {
     public:
 
         unsigned size;
+        uint16_t packet_id;
 
         std::array<uint8_t, 256> data;
 
