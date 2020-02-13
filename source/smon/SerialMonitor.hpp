@@ -6,7 +6,7 @@
 #include <thread>
 
 #include "Log.hpp"
-#include "DataPacket.hpp"
+#include "DataBuffer.hpp"
 
 namespace smon {
 
@@ -59,7 +59,7 @@ namespace smon {
 
         std::array<uint8_t, buffer_size> data_buffer;
 
-        std::list<DataPacket> received_packets;
+        std::list<DataBuffer> received_packets;
 
         void _read(void* buffer, unsigned size);
 

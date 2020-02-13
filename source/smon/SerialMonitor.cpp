@@ -1,8 +1,7 @@
 
 #include <boost/asio.hpp>
 
-#include "Header.hpp"
-#include "DataPacket.hpp"
+#include "PacketHeader.hpp"
 #include "SerialMonitor.hpp"
 #include "ExceptionCatch.hpp"
 
@@ -47,15 +46,14 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
                 return;
             }
 
-            static Header header;
+            static PacketHeader header;
 
             static uint8_t byte;
             asio::read(*__SERIAL, buffer(&byte, 1));
             header.add_byte(byte);
 
             if (header.is_valid()) {
-
-                DataPacket packet;
+                DataBuffer packet;
                 packet.size = header.size;
                // Logvar(packet.size);
                 for (unsigned i = 0; i < header.size; i++) {
@@ -102,7 +100,7 @@ void SerialMonitor::_read(void* buf, unsigned size) {
         return;
     }
 
-    auto packet_iterator = std::find_if(received_packets.begin(), received_packets.end(), [&](const DataPacket& packet) {
+    auto packet_iterator = std::find_if(received_packets.begin(), received_packets.end(), [&](const DataBuffer& packet) {
         return packet.size == size;
     });
 
@@ -112,7 +110,7 @@ void SerialMonitor::_read(void* buf, unsigned size) {
         return;
     }
 
-    DataPacket& packet = *packet_iterator;
+    DataBuffer& packet = *packet_iterator;
 
     memcpy(buf, &packet.data[0], size);
 

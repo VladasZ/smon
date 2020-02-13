@@ -12,7 +12,7 @@
 
 namespace smon {
 
-    class DataPacket {
+    class DataBuffer {
 
     public:
 
