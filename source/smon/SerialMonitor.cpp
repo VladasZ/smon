@@ -62,9 +62,9 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
                     packet.data[i]  = byte;
                 }
 
-                mutex.lock();
+                this->mutex.lock();
                 received_packets.push_back(packet);
-                mutex.unlock();
+                this->mutex.unlock();
             }
 
         }

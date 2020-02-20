@@ -3,6 +3,7 @@
 
 #include <list>
 #include <array>
+#include <mutex>
 #include <thread>
 
 #include "Log.hpp"
