@@ -42,9 +42,7 @@ SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
 
         while(true) {
 
-            if (stop) {
-                return;
-            }
+            if (stop) return;
 
             static PacketHeader header;
 
