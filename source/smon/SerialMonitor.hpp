@@ -21,7 +21,7 @@ namespace smon {
 
         bool failed_init = false;
 
-        explicit SerialMonitor(const std::string& port, unsigned baud_rate = MBED_SERIAL_BAUD);
+        explicit SerialMonitor(const std::string& port, unsigned baud_rate);
 
         ~SerialMonitor();
 
