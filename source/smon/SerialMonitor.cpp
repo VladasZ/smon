@@ -20,14 +20,8 @@ using namespace smon;
 
 SerialMonitor::SerialMonitor(const string& port, unsigned baud_rate) {
     io = new io_service();
-
-    try {
-        serial = new serial_port(*__IO, port);
-        __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
-    }
-    catch(...) {
-        Fatal(what());
-    }
+    serial = new serial_port(*__IO, port);
+    __SERIAL->set_option(serial_port_base::baud_rate(baud_rate));
 }
 
 SerialMonitor::~SerialMonitor() {

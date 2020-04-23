@@ -34,7 +34,7 @@ namespace smon {
         void* io;
 
         void _read(void* buffer, unsigned size);
-
+        
         void _write(const void* buffer, unsigned size);
 
     };
