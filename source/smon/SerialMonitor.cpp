@@ -1,11 +1,8 @@
 
 #include <boost/asio.hpp>
 
-#include "Log.hpp"
 #include "SerialMonitor.hpp"
-#include "ExceptionCatch.hpp"
 
-using namespace cu;
 
 using namespace std;
 using namespace boost;
