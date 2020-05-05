@@ -27,6 +27,7 @@ SerialMonitor::~SerialMonitor() {
 }
 
 void SerialMonitor::_read(void* buf, unsigned size) {
+    serial_port* spes = __SERIAL;
     asio::read(*__SERIAL, buffer(buf, size));
 }
 
