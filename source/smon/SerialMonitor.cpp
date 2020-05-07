@@ -26,11 +26,10 @@ SerialMonitor::~SerialMonitor() {
     delete __IO;
 }
 
-void SerialMonitor::_read(void* buf, unsigned size) {
-    serial_port* spes = __SERIAL;
+void SerialMonitor::read(void* buf, unsigned size) {
     asio::read(*__SERIAL, buffer(buf, size));
 }
 
-void SerialMonitor::_write(const void* buf, unsigned size) {
+void SerialMonitor::write(const void* buf, unsigned size) {
     asio::write(*__SERIAL, buffer(buf, size));
 }

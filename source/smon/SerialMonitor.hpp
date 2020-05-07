@@ -1,6 +1,7 @@
 
 #pragma once
 
+
 namespace smon {
 
     class SerialMonitor {
@@ -11,6 +12,9 @@ namespace smon {
 
         ~SerialMonitor();
 
+        SerialMonitor(const SerialMonitor&) = delete;
+        SerialMonitor& operator = (const SerialMonitor&) = delete;
+
         template<class T>
         T read() {
             T value;
@@ -20,12 +24,12 @@ namespace smon {
 
         template<class T>
         void read(T& value) {
-            _read(&value, sizeof(T));
+            read(&value, sizeof(T));
         }
 
         template<class T>
         void write(const T& value) {
-            _write(&value, sizeof(T));
+            write(&value, sizeof(T));
         }
 
     private:
@@ -33,9 +37,10 @@ namespace smon {
         void* serial;
         void* io;
 
-        void _read(void* buffer, unsigned size);
+    public:
 
-        void _write(const void* buffer, unsigned size);
+        void read(void* buffer, unsigned size);
+        void write(const void* buffer, unsigned size);
 
     };
 

@@ -9,6 +9,9 @@
 #include <map>
 #include <thread>
 
+#include "Log.hpp"
+#include "CRC.hpp"
+#include "DataUtils.hpp"
 #include "PacketHeader.hpp"
 #include "PacketsBuffer.hpp"
 
@@ -18,7 +21,7 @@ using namespace smon;
 static std::map<PacketsBuffer*, bool> stop;
 
 
-PacketsBuffer::PacketsBuffer(SerialMonitor& serial) : _serial(serial) {
+PacketsBuffer::PacketsBuffer(SerialMonitor* serial) : _serial(serial) {
     stop[this] = false;
 }
 
@@ -33,13 +36,33 @@ void PacketsBuffer::start_reading() {
         const bool& _stop = stop[this];
 
         PacketHeader header;
-        memset(&header, 0, sizeof(header));
+        wipe(header);
+
+        uint8_t byte;
 
         while (true) {
 
             if (_stop) break;
 
+            _serial->read(byte);
 
+            add_byte(header, byte);
+
+            if (!header.is_valid()) {
+                continue;
+            }
+
+            PacketData data(header);
+
+            _serial->read(data.data(), header.data_size + sizeof(PacketFooter));
+
+            if (!data.footer()->is_valid()) {
+                continue;
+            }
+
+            _mut.lock();
+            _packets.push_back(std::move(data));
+            _mut.unlock();
 
         }
 
