@@ -12,11 +12,9 @@
 #include <mutex>
 #include <optional>
 
-
 #include "Log.hpp"
 #include "PacketData.hpp"
 #include "SerialMonitor.hpp"
-#include "CircularBuffer.hpp"
 
 
 namespace smon {
@@ -28,6 +26,9 @@ namespace smon {
         explicit PacketsBuffer(SerialMonitor* serial);
 
         ~PacketsBuffer();
+
+        PacketsBuffer(const PacketsBuffer&) = delete;
+        PacketsBuffer& operator = (const PacketsBuffer&) = delete;
 
         void start_reading();
 
@@ -50,7 +51,6 @@ namespace smon {
 
         std::mutex _mut;
         SerialMonitor* _serial;
-        cu::CircularBuffer<1024> _buffer;
         std::list<cu::PacketData> _packets;
 
     };

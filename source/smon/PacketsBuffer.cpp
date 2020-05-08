@@ -10,7 +10,6 @@
 #include <thread>
 
 #include "Log.hpp"
-#include "CRC.hpp"
 #include "DataUtils.hpp"
 #include "PacketHeader.hpp"
 #include "PacketsBuffer.hpp"
@@ -46,7 +45,7 @@ void PacketsBuffer::start_reading() {
 
             _serial->read(byte);
 
-            add_byte(header, byte);
+            push_byte(header, byte);
 
             if (!header.is_valid()) {
                 continue;
