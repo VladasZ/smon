@@ -23,7 +23,7 @@ namespace smon {
 
     public:
 
-        explicit PacketsBuffer(SerialMonitor* serial);
+        explicit PacketsBuffer(SerialMonitor& serial);
 
         ~PacketsBuffer();
 
@@ -47,7 +47,7 @@ namespace smon {
     private:
 
         std::mutex _mut;
-        SerialMonitor* _serial;
+        SerialMonitor& _serial;
         std::list<cu::PacketData> _packets;
 
     };

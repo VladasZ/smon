@@ -20,7 +20,7 @@ using namespace smon;
 static std::map<PacketsBuffer*, bool> stop;
 
 
-PacketsBuffer::PacketsBuffer(SerialMonitor* serial) : _serial(serial) {
+PacketsBuffer::PacketsBuffer(SerialMonitor& serial) : _serial(serial) {
     stop[this] = false;
 }
 
@@ -43,7 +43,7 @@ void PacketsBuffer::start_reading() {
 
             if (_stop) break;
 
-            _serial->read(byte);
+            _serial.read(byte);
 
             push_byte(header, byte);
 
@@ -53,7 +53,7 @@ void PacketsBuffer::start_reading() {
 
             PacketData data(header);
 
-            _serial->read(data.data(), header.data_size + sizeof(PacketFooter));
+            _serial.read(data.data(), header.data_size + sizeof(PacketFooter));
 
             if (!data.footer()->is_valid()) {
                 continue;

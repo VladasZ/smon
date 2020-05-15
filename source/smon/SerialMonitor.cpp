@@ -33,3 +33,11 @@ void SerialMonitor::read(void* buf, unsigned size) {
 void SerialMonitor::write(const void* buf, unsigned size) {
     asio::write(*__SERIAL, buffer(buf, size));
 }
+
+void SerialMonitor::lock() {
+    mutex.lock();
+}
+
+void SerialMonitor::unlock() {
+    mutex.unlock();
+}

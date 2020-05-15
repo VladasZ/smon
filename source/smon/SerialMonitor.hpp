@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <mutex>
+
 #include "NonCopyable.hpp"
 
 
@@ -36,10 +38,15 @@ namespace smon {
         void* serial;
         void* io;
 
+        std::mutex mutex;
+
     public:
 
         void read(void* buffer, unsigned size);
         void write(const void* buffer, unsigned size);
+
+        void lock();
+        void unlock();
 
     };
 
