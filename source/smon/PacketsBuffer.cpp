@@ -60,7 +60,7 @@ void PacketsBuffer::start_reading() {
             }
 
             _mut.lock();
-            _packets.push_back(std::move(data));
+            _packets.emplace_back(std::move(data));
             _mut.unlock();
 
         }

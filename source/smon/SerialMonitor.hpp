@@ -1,19 +1,18 @@
 
 #pragma once
 
+#include "NonCopyable.hpp"
+
 
 namespace smon {
 
-    class SerialMonitor {
+    class SerialMonitor : cu::NonCopyable {
 
     public:
 
         explicit SerialMonitor(const std::string& port, unsigned baud_rate);
 
         ~SerialMonitor();
-
-        SerialMonitor(const SerialMonitor&) = delete;
-        SerialMonitor& operator = (const SerialMonitor&) = delete;
 
         template<class T>
         T read() {

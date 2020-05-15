@@ -19,16 +19,13 @@
 
 namespace smon {
 
-    class PacketsBuffer {
+    class PacketsBuffer : cu::NonCopyable {
 
     public:
 
         explicit PacketsBuffer(SerialMonitor* serial);
 
         ~PacketsBuffer();
-
-        PacketsBuffer(const PacketsBuffer&) = delete;
-        PacketsBuffer& operator = (const PacketsBuffer&) = delete;
 
         void start_reading();
 
