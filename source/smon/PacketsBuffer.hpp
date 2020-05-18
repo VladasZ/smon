@@ -13,6 +13,7 @@
 #include <optional>
 
 #include "Log.hpp"
+#include "Error.hpp"
 #include "PacketData.hpp"
 #include "SerialMonitor.hpp"
 
@@ -32,6 +33,17 @@ namespace smon {
         template <class T>
         std::optional<T> get() {
             _mut.lock();
+
+            if (!_errors.empty()) {
+                Separator;
+                Log("Errors:");
+                for (const auto& error : _errors) {
+                    Log(error);
+                }
+                Separator;
+                _errors.clear();
+            }
+
             if (_packets.empty()) {
                 _mut.unlock();
                 return std::nullopt;
@@ -49,6 +61,7 @@ namespace smon {
         std::mutex _mut;
         SerialMonitor& _serial;
         std::list<cu::PacketData> _packets;
+        std::vector<cu::Error> _errors;
 
     };
 

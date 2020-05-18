@@ -60,7 +60,14 @@ void PacketsBuffer::start_reading() {
             }
 
             _mut.lock();
-            _packets.emplace_back(std::move(data));
+            if (data.header.packet_id == Error::packet_id) {
+                Error error;
+                memcpy(&error, data.data(), sizeof(Error));
+                _errors.emplace_back(error);
+            }
+            else {
+                _packets.emplace_back(std::move(data));
+            }
             _mut.unlock();
 
         }
