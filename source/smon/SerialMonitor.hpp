@@ -48,6 +48,12 @@ namespace smon {
         void lock();
         void unlock();
 
+        void sync(std::function<void(SerialMonitor&)> action) {
+            lock();
+            action(*this);
+            unlock();
+        }
+
     };
 
 }

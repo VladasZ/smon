@@ -31,34 +31,52 @@ namespace smon {
         void start_reading();
 
         template <class T>
-        std::optional<T> get() {
-            _mut.lock();
+        T get() {
 
-            if (!_errors.empty()) {
-                Separator;
-                Log("Errors:");
-                for (const auto& error : _errors) {
-                    Log(error);
-                }
-                Separator;
-                _errors.clear();
-            }
+            _request_mut.lock();
+//
+//            if (_force_unlock) {
+//                _force_unlock = false;
+//                _request_mut.lock();
+//                return { };
+//            }
 
-            if (_packets.empty()) {
-                _mut.unlock();
-                return std::nullopt;
-            }
+            _packets_mut.lock();
+
             auto& packet = _packets.back();
             T result;
             memcpy(&result, packet.data(), sizeof(T));
             _packets.pop_back();
-            _mut.unlock();
+
+            _packets_mut.unlock();
+
             return result;
+        }
+
+        void check_errors() {
+            if (_errors.empty()) return;
+            _errors_mut.lock();
+            Separator;
+            Log(std::string() + "Errors: " + std::to_string(_errors.size()));
+            for (const auto& error : _errors) {
+                Log(error);
+            }
+            Separator;
+            _errors.clear();
+            _errors_mut.unlock();
+        }
+
+        void force_unlock() {
+           // _request_mut.unlock();
         }
 
     private:
 
-        std::mutex _mut;
+        bool _force_unlock = false;
+
+        std::mutex _request_mut;
+        std::mutex _packets_mut;
+        std::mutex _errors_mut;
         SerialMonitor& _serial;
         std::list<cu::PacketData> _packets;
         std::vector<cu::Error> _errors;

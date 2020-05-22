@@ -22,6 +22,7 @@ static std::map<PacketsBuffer*, bool> stop;
 
 PacketsBuffer::PacketsBuffer(SerialMonitor& serial) : _serial(serial) {
     stop[this] = false;
+    _request_mut.lock();
 }
 
 PacketsBuffer::~PacketsBuffer() {
@@ -59,16 +60,19 @@ void PacketsBuffer::start_reading() {
                 continue;
             }
 
-            _mut.lock();
             if (data.header.packet_id == Error::packet_id) {
                 Error error;
                 memcpy(&error, data.data(), sizeof(Error));
+                _errors_mut.lock();
                 _errors.emplace_back(error);
+                _errors_mut.unlock();
             }
             else {
+                _packets_mut.lock();
                 _packets.emplace_back(std::move(data));
+                _packets_mut.unlock();
+                _request_mut.unlock();
             }
-            _mut.unlock();
 
         }
 
