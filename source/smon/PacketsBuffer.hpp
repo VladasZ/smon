@@ -13,7 +13,7 @@
 #include <optional>
 
 #include "Log.hpp"
-#include "Error.hpp"
+#include "BoardMessage.hpp"
 #include "PacketData.hpp"
 #include "SerialMonitor.hpp"
 
@@ -34,13 +34,6 @@ namespace smon {
         T get() {
 
             _request_mut.lock();
-//
-//            if (_force_unlock) {
-//                _force_unlock = false;
-//                _request_mut.lock();
-//                return { };
-//            }
-
             _packets_mut.lock();
 
             auto& packet = _packets.back();
@@ -53,17 +46,17 @@ namespace smon {
             return result;
         }
 
-        void check_errors() {
-            if (_errors.empty()) return;
-            _errors_mut.lock();
+        void check_messages() {
+            if (_messages.empty()) return;
+            _messages_mut.lock();
             Separator;
-            Log(std::string() + "Errors: " + std::to_string(_errors.size()));
-            for (const auto& error : _errors) {
+            Log(std::string() + "Messages: " + std::to_string(_messages.size()));
+            for (const auto& error : _messages) {
                 Log(error);
             }
             Separator;
-            _errors.clear();
-            _errors_mut.unlock();
+            _messages.clear();
+            _messages_mut.unlock();
         }
 
         void force_unlock() {
@@ -76,10 +69,10 @@ namespace smon {
 
         std::mutex _request_mut;
         std::mutex _packets_mut;
-        std::mutex _errors_mut;
+        std::mutex _messages_mut;
         SerialMonitor& _serial;
         std::list<cu::PacketData> _packets;
-        std::vector<cu::Error> _errors;
+        std::vector<cu::BoardMessage> _messages;
 
     };
 

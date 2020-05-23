@@ -60,19 +60,23 @@ void PacketsBuffer::start_reading() {
                 continue;
             }
 
-            if (data.header.packet_id == Error::packet_id) {
-                Error error;
-                memcpy(&error, data.data(), sizeof(Error));
-                _errors_mut.lock();
-                _errors.emplace_back(error);
-                _errors_mut.unlock();
+            if (!data.checksum_is_valid()) {
+                Log(std::string() + "Invalid checksum for packet with id: " + std::to_string(data.header.packet_id));
+                continue;
             }
-            else {
-                _packets_mut.lock();
-                _packets.emplace_back(std::move(data));
-                _packets_mut.unlock();
-                _request_mut.unlock();
+
+            if (data.header.packet_id == BoardMessage::packet_id) {
+                BoardMessage error;
+                memcpy(&error, data.data(), sizeof(BoardMessage));
+                _messages.emplace_back(error);
+                _messages_mut.unlock();
+                continue;
             }
+
+            _packets_mut.lock();
+            _packets.emplace_back(std::move(data));
+            _packets_mut.unlock();
+            _request_mut.unlock();
 
         }
 
