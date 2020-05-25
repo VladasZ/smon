@@ -33,8 +33,13 @@ namespace smon {
         template <class T>
         T get() {
 
-            _request_mut.lock();
             _packets_mut.lock();
+
+            if (_packets.empty()) {
+                Log("No packets");
+                _packets_mut.unlock();
+                return { };
+            }
 
             auto& packet = _packets.back();
             T result;
