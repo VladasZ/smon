@@ -33,26 +33,22 @@ namespace smon {
             write(&value, sizeof(T));
         }
 
+        template<class T, class ...Args>
+        void write(Args&&... args) {
+            static T value;
+            value = T { std::forward<Args>(args)... };
+            write(value);
+        }
+
     private:
 
         void* serial;
         void* io;
 
-        std::mutex mutex;
-
     public:
 
         void read(void* buffer, unsigned size);
         void write(const void* buffer, unsigned size);
-
-        void lock();
-        void unlock();
-
-        void sync(std::function<void(SerialMonitor&)> action) {
-            lock();
-            action(*this);
-            unlock();
-        }
 
     };
 

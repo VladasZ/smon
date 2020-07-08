@@ -32,7 +32,7 @@ namespace smon {
 
         template <class T>
         T get() {
-
+            _has_packets_mut.lock();
             _packets_mut.lock();
 
             if (_packets.empty()) {
@@ -52,29 +52,31 @@ namespace smon {
         }
 
         void check_messages() {
-            if (_messages.empty()) return;
+            _has_messages_mut.lock();
             _messages_mut.lock();
-            Separator;
-            Log(std::string() + "Messages: " + std::to_string(_messages.size()));
-            for (const auto& error : _messages) {
-                Log(error);
+            for (const auto& message : _messages) {
+                std::cout << "STM32: ";
+                CleanLog(message);
             }
-            Separator;
             _messages.clear();
             _messages_mut.unlock();
         }
 
         void force_unlock() {
-           // _request_mut.unlock();
+            _messages.clear();
+            _packets.clear();
+            _has_packets_mut.unlock();
+            _packets_mut.unlock();
         }
 
     private:
 
-        bool _force_unlock = false;
-
-        std::mutex _request_mut;
         std::mutex _packets_mut;
+        std::mutex _has_packets_mut;
+
         std::mutex _messages_mut;
+        std::mutex _has_messages_mut;
+
         SerialMonitor& _serial;
         std::list<cu::PacketData> _packets;
         std::vector<cu::BoardMessage> _messages;

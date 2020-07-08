@@ -22,7 +22,8 @@ static std::map<PacketsBuffer*, bool> stop;
 
 PacketsBuffer::PacketsBuffer(SerialMonitor& serial) : _serial(serial) {
     stop[this] = false;
-    _request_mut.lock();
+    _has_packets_mut.lock();
+    _has_messages_mut.lock();
 }
 
 PacketsBuffer::~PacketsBuffer() {
@@ -42,7 +43,9 @@ void PacketsBuffer::start_reading() {
 
         while (true) {
 
-            if (_stop) break;
+            if (_stop) {
+                break;
+            }
 
             _serial.read(byte);
 
@@ -75,14 +78,14 @@ void PacketsBuffer::start_reading() {
                 memcpy(&error, data.data(), sizeof(BoardMessage));
                 _messages.emplace_back(error);
                 _messages_mut.unlock();
+                _has_messages_mut.unlock();
                 continue;
             }
 
             _packets_mut.lock();
             _packets.emplace_back(std::move(data));
             _packets_mut.unlock();
-            _request_mut.unlock();
-
+            _has_packets_mut.unlock();
         }
 
         stop.erase(this);
