@@ -1,4 +1,6 @@
 
+#ifdef USING_BOOST
+
 #include <boost/asio.hpp>
 
 #include "SerialMonitor.hpp"
@@ -33,3 +35,5 @@ void SerialMonitor::read(void* buf, unsigned size) {
 void SerialMonitor::write(const void* buf, unsigned size) {
     asio::write(*__SERIAL, buffer(buf, size));
 }
+
+#endif
