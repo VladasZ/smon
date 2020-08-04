@@ -17,24 +17,14 @@
 using namespace cu;
 using namespace smon;
 
-static std::map<PacketsBuffer*, bool> stop;
-
 
 PacketsBuffer::PacketsBuffer(SerialMonitor& serial) : _serial(serial) {
-    stop[this] = false;
-    _has_packets_mut.lock();
-    _has_messages_mut.lock();
-}
 
-PacketsBuffer::~PacketsBuffer() {
-    stop[this] = true;
 }
 
 void PacketsBuffer::start_reading() {
 
     std::thread([&] {
-
-        const bool& _stop = stop[this];
 
         EmptyHeader header;
         wipe(header);
@@ -42,10 +32,6 @@ void PacketsBuffer::start_reading() {
         uint8_t byte;
 
         while (true) {
-
-            if (_stop) {
-                break;
-            }
 
             _serial.read(byte);
 
@@ -76,19 +62,17 @@ void PacketsBuffer::start_reading() {
             if (data.header.packet_id == BoardMessage::packet_id) {
                 BoardMessage error;
                 memcpy(&error, data.data(), sizeof(BoardMessage));
+                _messages_mutex.lock();
                 _messages.emplace_back(error);
-                _messages_mut.unlock();
-                _has_messages_mut.unlock();
+                _messages_mutex.unlock();
                 continue;
             }
 
-            _packets_mut.lock();
+            _packets_mutex.lock();
             _packets.emplace_back(std::move(data));
-            _packets_mut.unlock();
-            _has_packets_mut.unlock();
-        }
+            _packets_mutex.unlock();
 
-        stop.erase(this);
+        }
 
     }).detach();
 
