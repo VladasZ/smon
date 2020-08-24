@@ -32,7 +32,7 @@ namespace smon {
         T get() {
 
             if (_packets.empty()) {
-                Log("No packets");
+                Log << "No packets";
                 return { };
             }
 

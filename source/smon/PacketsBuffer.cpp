@@ -46,16 +46,16 @@ void PacketsBuffer::start_reading() {
             _serial.read(data.data(), header.data_size + sizeof(PacketFooter));
 
             if (!data.footer()->is_valid()) {
-                Log("Invalid footer");
-                Log(char_string(PacketFooter::_end_data));
-                Log(char_string(data.footer()->value));
+                Log << "Invalid footer";
+                Log << char_string(PacketFooter::_end_data);
+                Log << char_string(data.footer()->value);
                 continue;
             }
 
             if (!data.checksum_is_valid()) {
-                Log(std::string() + "Invalid checksum for packet with id: " + std::to_string(data.header.packet_id));
-                Log("Packet data:");
-                Log(char_string(data.data(), header.data_size));
+                Log << "Invalid checksum for packet with id:" << data.header.packet_id;
+                Log << "Packet data:";
+                Log << char_string(data.data(), header.data_size);
                 continue;
             }
 
