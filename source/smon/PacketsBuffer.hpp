@@ -33,7 +33,7 @@ namespace smon {
 
             if (_packets.empty()) {
                 Log << "No packets";
-                return { };
+                return T { };
             }
 
             auto& packet = _packets.back();
