@@ -49,7 +49,7 @@ namespace smon {
         void check_messages() {
             for (const auto& message : _messages) {
                 std::cout << "STM32: ";
-                CleanLog(message);
+				std::cout << VarString(message);
             }
             _messages_mutex.lock();
             _messages.clear();
