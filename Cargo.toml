@@ -1,0 +1,31 @@
+[package]
+name = "smon"
+version = "0.1.0"
+edition = "2024"
+description = "Minimalistic TUI serial monitor"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/VladasZ/smon"
+readme = "README.md"
+keywords = ["serial", "tui", "monitor", "uart", "terminal"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[[bin]]
+name = "smon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+nucleo-matcher = { workspace = true }
+ratatui = { workspace = true }
+serialport = { workspace = true }
+
+[workspace]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+crossterm = "0.29.0"
+nucleo-matcher = "0.3.1"
+ratatui = "0.30.0"
+serialport = "4.9.0"
