@@ -12,10 +12,7 @@ fn main() -> Result<()> {
 }
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
-    let ports = serialport::available_ports().context("listing serial ports")?;
-    if ports.is_empty() {
-        anyhow::bail!("no serial ports found");
-    }
+    let ports = serialport::available_ports().unwrap_or_default();
 
     let port_items: Vec<picker::Item> = ports
         .into_iter()
@@ -38,7 +35,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         })
         .collect();
 
-    let port = match picker::pick(terminal, "Select serial port", &port_items, None)? {
+    let port = match picker::pick(terminal, "Select serial port", &port_items, None, true)? {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -53,7 +50,13 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         .collect();
     let default_baud_index = bauds.iter().position(|b| *b == 115200);
 
-    let baud = match picker::pick(terminal, "Select baud rate", &baud_items, default_baud_index)? {
+    let baud = match picker::pick(
+        terminal,
+        "Select baud rate",
+        &baud_items,
+        default_baud_index,
+        false,
+    )? {
         Some(b) => b.parse::<u32>().context("parsing baud rate")?,
         None => return Ok(()),
     };

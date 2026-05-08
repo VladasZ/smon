@@ -21,6 +21,7 @@ pub fn pick(
     title: &str,
     items: &[Item],
     default_index: Option<usize>,
+    allow_free_text: bool,
 ) -> Result<Option<String>> {
     let mut matcher = Matcher::new(Config::DEFAULT);
     let labels: Vec<Utf32String> = items
@@ -79,9 +80,12 @@ pub fn pick(
                 .highlight_symbol("> ");
             frame.render_stateful_widget(list, chunks[1], &mut state);
 
-            let footer = Paragraph::new(Line::from(
-                "type to filter | up/down: move | enter: select | esc: cancel",
-            ));
+            let footer_text = if allow_free_text {
+                "type to filter or enter raw path | up/down: move | enter: select | esc: cancel"
+            } else {
+                "type to filter | up/down: move | enter: select | esc: cancel"
+            };
+            let footer = Paragraph::new(Line::from(footer_text));
             frame.render_widget(footer, chunks[2]);
         })?;
 
@@ -101,6 +105,9 @@ pub fn pick(
                     && let Some(item) = filtered.get(sel)
                 {
                     return Ok(Some(item.value.clone()));
+                }
+                if allow_free_text && !query.is_empty() {
+                    return Ok(Some(query));
                 }
             }
             (KeyCode::Up, _) => {
