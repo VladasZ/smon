@@ -18,6 +18,8 @@ anyhow = { workspace = true }
 crossterm = { workspace = true }
 nucleo-matcher = { workspace = true }
 ratatui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 serialport = { workspace = true }
 
 [workspace]
@@ -28,4 +30,6 @@ anyhow = "1.0.102"
 crossterm = "0.29.0"
 nucleo-matcher = "0.3.1"
 ratatui = "0.30.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 serialport = "4.9.0"

@@ -59,7 +59,7 @@ pub fn run(terminal: &mut DefaultTerminal, port_name: &str, baud: u32) -> Result
                 .scroll((scroll, 0));
             frame.render_widget(text, chunks[0]);
 
-            let status = Line::from(format!(" {port_name} @ {baud}  |  Ctrl+] to quit"));
+            let status = Line::from(format!(" {port_name} @ {baud}  |  Ctrl+Q to quit"));
             frame.render_widget(Paragraph::new(status), chunks[1]);
         })?;
 
@@ -124,7 +124,12 @@ fn is_quit(key: &KeyEvent) -> bool {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
-    matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+    // Ctrl+] emits 0x1D, which crossterm reports as Char('5'). That key is missing on some
+    // keyboard layouts, so Ctrl+Q is the layout-independent quit.
+    matches!(
+        key.code,
+        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Char(']') | KeyCode::Char('5')
+    )
 }
 
 fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
@@ -161,4 +166,36 @@ fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
         KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn ctrl_q_quits() {
+        assert!(is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(is_quit(&key(KeyCode::Char('Q'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn ctrl_bracket_and_its_control_byte_quit() {
+        assert!(is_quit(&key(KeyCode::Char(']'), KeyModifiers::CONTROL)));
+        assert!(is_quit(&key(KeyCode::Char('5'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn plain_q_does_not_quit() {
+        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn unrelated_control_keys_do_not_quit() {
+        assert!(!is_quit(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert!(!is_quit(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
 }
