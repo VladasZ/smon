@@ -525,23 +525,44 @@ mod tests {
         assert_eq!(ui.suggestion, None);
     }
 
-    // A real captured device line. At an inner width of 118 the word-wrapper packs it into 2
-    // rows, but a naive ceil(chars / width) count says 3 because the 237th char is a trailing
-    // space that the wrapper drops at the wrap boundary. Feeding many of these makes a naive
-    // row total overshoot the real wrapped height, which used to push the log off the top of
-    // the pane and leave the bottom blank. Keep the trailing space, it is the whole point.
-    const OVERCOUNT_LINE: &str = "D I P1 0x00F 0x00000 26-07-01~05:40:42.222+00:00~#  PR03 S30 RestartManager ErrorlogReceiverRepositoryElement.cpp Line 77 : ErrorlogReceiverRepositoryElement::initializeAfterAllRepositoryElements() called, initializing errorlogReceiver~ ";
+    // Two real captured device lines. The word-wrapper drops the whitespace that lands on a
+    // wrap boundary, so it packs each into fewer rows than a naive ceil(chars / width) count:
+    // the first over-counts on a narrow terminal, the second on a wide one. Feeding many of
+    // these used to make the naive row total overshoot the real wrapped height, so the scroll
+    // ran past the bottom and stranded the newest lines at the top of the pane. Keep the
+    // trailing spaces, they are what tips ceil() over while the wrapper still fits the line.
+    const NARROW_OVERCOUNT: &str = "D I P1 0x00F 0x00000 26-07-01~05:40:42.222+00:00~#  PR03 S30 RestartManager ErrorlogReceiverRepositoryElement.cpp Line 77 : ErrorlogReceiverRepositoryElement::initializeAfterAllRepositoryElements() called, initializing errorlogReceiver~ ";
+    const WIDE_OVERCOUNT: &str = "D I P1 0x00F 0x00000 26-07-01~05:40:45.039+00:00~#  PR03 S30 RestartManager RemoteLoggingRepositoryElement.cpp Line 180 : RemoteLoggingRepositoryElement::initializeAfterAllRepositoryElements() called, initializing BranchHandler~ ";
 
     #[test]
-    fn newest_lines_pinned_to_bottom_when_overflowing() {
+    fn narrow_terminal_pins_log_to_bottom_when_overflowing() {
+        assert_bottom_filled(NARROW_OVERCOUNT, 237, 120, 24);
+    }
+
+    #[test]
+    fn wide_terminal_pins_log_to_bottom_when_overflowing() {
+        assert_bottom_filled(WIDE_OVERCOUNT, 229, 230, 20);
+    }
+
+    // Fill the pane with copies of an over-counting line and check the last text row is not
+    // blank. The precondition asserts the line really does over-count at this width, so the
+    // test can never silently pass on data that stopped triggering the bug (a lost trailing
+    // space, or a change in ratatui's wrapping).
+    fn assert_bottom_filled(line: &str, expected_len: usize, width: u16, height: u16) {
         use ratatui::{Terminal, backend::TestBackend};
 
-        assert_eq!(OVERCOUNT_LINE.chars().count(), 237, "trailing space lost");
+        assert_eq!(line.chars().count(), expected_len, "test line length changed");
+        let inner = width - 2;
+        let naive = line.chars().count().div_ceil(inner as usize);
+        let wrapped = Paragraph::new(line).wrap(Wrap { trim: false }).line_count(inner);
+        assert!(
+            naive > wrapped,
+            "line must over-count at width {width}: naive={naive} wrapped={wrapped}"
+        );
 
-        let (width, height) = (120u16, 24u16);
         let mut ui = Ui::default();
-        for _ in 0..50 {
-            ui.push_rx(OVERCOUNT_LINE.as_bytes());
+        for _ in 0..80 {
+            ui.push_rx(line.as_bytes());
             ui.push_rx(b"\n");
         }
 
@@ -557,7 +578,7 @@ mod tests {
             .collect();
         assert!(
             !row.trim().is_empty(),
-            "bottom log row is blank -- content over-scrolled and left empty space below it"
+            "bottom log row is blank at width {width} -- content over-scrolled off the top"
         );
     }
 }
