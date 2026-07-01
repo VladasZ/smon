@@ -1,4 +1,4 @@
-use std::{thread, time::Duration};
+use std::{net::SocketAddr, thread, time::Duration};
 
 use anyhow::{Context, Result};
 use ratatui::DefaultTerminal;
@@ -6,6 +6,7 @@ use serialport::{SerialPortType, available_ports};
 
 mod config;
 mod log;
+mod mcp;
 mod picker;
 mod probe;
 mod session;
@@ -13,16 +14,18 @@ mod wsl;
 
 const ATTACH_SENTINEL: &str = "\0usbipd-attach:";
 const DEFAULT_BAUD: u32 = 115200;
+const DEFAULT_MCP: &str = "127.0.0.1:4123";
 
 fn main() -> Result<()> {
     let eol = parse_eol()?;
+    let mcp_bind = parse_mcp()?;
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &eol);
+    let result = run(&mut terminal, &eol, mcp_bind);
     ratatui::restore();
     result
 }
 
-fn run(terminal: &mut DefaultTerminal, eol: &[u8]) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, eol: &[u8], mcp_bind: SocketAddr) -> Result<()> {
     loop {
         let Some(port) = select_port(terminal)? else {
             return Ok(());
@@ -33,8 +36,25 @@ fn run(terminal: &mut DefaultTerminal, eol: &[u8]) -> Result<()> {
         let mut config = config::Config::load();
         config.baud.insert(port.clone(), baud);
         config.save()?;
-        return session::run(terminal, &port, baud, eol);
+        return session::run(terminal, &port, baud, eol, mcp_bind);
     }
+}
+
+// The MCP server always runs; --mcp only moves it off the default local bind.
+fn parse_mcp() -> Result<SocketAddr> {
+    let mut args = std::env::args().skip(1);
+    let mut value: Option<String> = None;
+    while let Some(arg) = args.next() {
+        if let Some(v) = arg.strip_prefix("--mcp=") {
+            value = Some(v.to_string());
+        } else if arg == "--mcp" {
+            value = args.next();
+        }
+    }
+
+    let text = value.as_deref().unwrap_or(DEFAULT_MCP);
+    text.parse::<SocketAddr>()
+        .with_context(|| format!("invalid --mcp address '{text}', expected host:port like {DEFAULT_MCP}"))
 }
 
 fn parse_eol() -> Result<Vec<u8>> {
@@ -207,7 +227,7 @@ mod tests {
     #[test]
     fn ports_sort_numerically_not_lexically() {
         let mut names = vec!["COM10", "COM9", "COM1"];
-        names.sort_by(|a, b| port_sort_key(a).cmp(&port_sort_key(b)));
+        names.sort_by_key(|a| port_sort_key(a));
         assert_eq!(names, ["COM1", "COM9", "COM10"]);
     }
 }

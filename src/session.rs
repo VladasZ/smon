@@ -1,7 +1,11 @@
 use std::{
     io::{Read, Write},
     mem::take,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    net::SocketAddr,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread,
     time::Duration,
 };
@@ -19,13 +23,20 @@ use ratatui::{
 };
 use serialport::SerialPort;
 
-use crate::{config, log::SessionLog, probe::Lock};
+use crate::{
+    config,
+    log::SessionLog,
+    mcp::{self, Inject, Shared},
+    probe::Lock,
+};
 
 const MAX_LINES: usize = 5000;
 
 enum Origin {
     Rx,
     Tx,
+    Agent,
+    System,
 }
 
 struct OutLine {
@@ -68,11 +79,25 @@ impl Ui {
     }
 
     fn echo_tx(&mut self, text: &str) {
+        self.push_out(Origin::Tx, text);
+    }
+
+    // Injected input and smon notices join the same scrollback, so the person at
+    // the TUI sees exactly what an MCP client did, in order with everything else.
+    fn echo_agent(&mut self, text: &str) {
+        self.push_out(Origin::Agent, text);
+    }
+
+    fn push_system(&mut self, text: &str) {
+        self.push_out(Origin::System, text);
+    }
+
+    fn push_out(&mut self, origin: Origin, text: &str) {
         if !self.rx_partial.is_empty() {
             self.end_line();
         }
         self.lines.push(OutLine {
-            origin: Origin::Tx,
+            origin,
             text: text.to_string(),
         });
         self.cap_lines();
@@ -189,6 +214,7 @@ pub fn run(
     port_name: &str,
     baud: u32,
     eol: &[u8],
+    mcp_bind: SocketAddr,
 ) -> Result<()> {
     // Hold the probe lock across the open so another instance's port probe can't briefly grab
     // the port at the same instant and make this open fail with access-denied.
@@ -210,13 +236,26 @@ pub fn run(
 
     let (rx_tx, rx_rx) = mpsc::channel::<Vec<u8>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let reader_thread = thread::spawn(move || reader_loop(reader, rx_tx, stop_rx));
+
+    // Shared serial-console state the MCP server reads and writes through. The reader thread feeds
+    // it received bytes; MCP tools queue input on the inject channel, which this loop drains and
+    // writes to the port, so the port is only ever written from one place.
+    let (inject_tx, mut inject_rx) = tokio::sync::mpsc::unbounded_channel::<Inject>();
+    let state = Shared::new(port_name.to_string(), baud, eol.to_vec(), inject_tx);
+
+    let reader_state = Arc::clone(&state);
+    let reader_thread = thread::spawn(move || reader_loop(reader, rx_tx, stop_rx, reader_state));
+
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<SocketAddr, String>>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_thread = mcp::spawn(mcp_bind, Arc::clone(&state), ready_tx, shutdown_rx);
 
     let mut config = config::Config::load();
     let mut ui = Ui {
         history: config.history.clone(),
         ..Default::default()
     };
+    let mut mcp_status: Option<SocketAddr> = None;
     let mut error: Option<String> = None;
 
     loop {
@@ -234,7 +273,38 @@ pub fn run(
             }
         }
 
-        draw(terminal, &ui, port_name, baud)?;
+        // Report the MCP bind result once it arrives, as a scrollback notice and in the log.
+        if let Ok(result) = ready_rx.try_recv() {
+            let note = match result {
+                Ok(addr) => {
+                    mcp_status = Some(addr);
+                    format!("mcp serving http://{addr}/mcp")
+                }
+                Err(e) => format!("mcp disabled: {e}"),
+            };
+            ui.push_system(&note);
+            log.system(&note)?;
+        }
+
+        // Write input queued by MCP clients, echoing and logging it like a keystroke.
+        while let Ok(inject) = inject_rx.try_recv() {
+            match port.write_all(&inject.bytes) {
+                Ok(()) => {
+                    ui.echo_agent(&inject.echo);
+                    log.tx_agent(&inject.bytes)?;
+                    let _ = inject.resp.send(Ok(()));
+                }
+                Err(e) => {
+                    let msg = format!("write error: {e}");
+                    let _ = inject.resp.send(Err(msg.clone()));
+                    state.set_connected(false);
+                    error = Some(msg);
+                    break;
+                }
+            }
+        }
+
+        draw(terminal, &ui, port_name, baud, mcp_status)?;
 
         if error.is_some() {
             break;
@@ -299,8 +369,13 @@ pub fn run(
         }
     }
 
+    let _ = shutdown_tx.send(());
     let _ = stop_tx.send(());
     let _ = reader_thread.join();
+    // The MCP server thread is detached, not joined: a client holding an SSE
+    // stream open can keep graceful shutdown from returning, so we signal it and
+    // let process exit reap it rather than block quit on a client.
+    drop(server_thread);
 
     if let Some(e) = error {
         anyhow::bail!(e);
@@ -308,11 +383,21 @@ pub fn run(
     Ok(())
 }
 
-fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &Ui, port_name: &str, baud: u32) -> Result<()>
+fn draw<B: Backend>(
+    terminal: &mut Terminal<B>,
+    ui: &Ui,
+    port_name: &str,
+    baud: u32,
+    mcp: Option<SocketAddr>,
+) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let border = Style::new().fg(Color::DarkGray);
+    let title = match mcp {
+        Some(addr) => format!(" {port_name} @ {baud}   mcp {addr} "),
+        None => format!(" {port_name} @ {baud} "),
+    };
 
     terminal.draw(|frame| {
         let chunks = Layout::default()
@@ -324,7 +409,7 @@ where
         let out_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border)
-            .title(Line::from(format!(" {port_name} @ {baud} ")))
+            .title(Line::from(title.clone()))
             .title(Line::from(" ctrl+q: quit ").right_aligned());
         let out_inner = out_block.inner(out_area);
         frame.render_widget(out_block, out_area);
@@ -336,6 +421,8 @@ where
             let (text, style) = match line.origin {
                 Origin::Rx => (line.text.clone(), Style::default()),
                 Origin::Tx => (format!("> {}", line.text), Style::new().fg(Color::Cyan)),
+                Origin::Agent => (format!(">> {}", line.text), Style::new().fg(Color::Magenta)),
+                Origin::System => (format!("-- {}", line.text), Style::new().fg(Color::DarkGray)),
             };
             rendered.push(Line::styled(text, style));
         }
@@ -410,7 +497,12 @@ where
     Ok(())
 }
 
-fn reader_loop(mut port: Box<dyn SerialPort>, tx: Sender<Vec<u8>>, stop_rx: Receiver<()>) {
+fn reader_loop(
+    mut port: Box<dyn SerialPort>,
+    tx: Sender<Vec<u8>>,
+    stop_rx: Receiver<()>,
+    state: Arc<Shared>,
+) {
     let mut buf = [0u8; 4096];
     loop {
         if matches!(
@@ -422,12 +514,18 @@ fn reader_loop(mut port: Box<dyn SerialPort>, tx: Sender<Vec<u8>>, stop_rx: Rece
         match port.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
+                // Feed the MCP buffer straight from the reader so expect() sees bytes without
+                // waiting on the ~16ms UI tick.
+                state.push_rx(&buf[..n]);
                 if tx.send(buf[..n].to_vec()).is_err() {
                     return;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => return,
+            Err(_) => {
+                state.set_connected(false);
+                return;
+            }
         }
     }
 }
@@ -485,8 +583,10 @@ mod tests {
 
     #[test]
     fn history_recall_walks_back_and_forward() {
-        let mut ui = Ui::default();
-        ui.history = vec!["first".into(), "second".into()];
+        let mut ui = Ui {
+            history: vec!["first".into(), "second".into()],
+            ..Default::default()
+        };
 
         ui.history_prev();
         assert_eq!(ui.input.iter().collect::<String>(), "second");
@@ -509,16 +609,20 @@ mod tests {
 
     #[test]
     fn suggestion_fuzzy_matches_history() {
-        let mut ui = Ui::default();
-        ui.history = vec!["get_status".into(), "reboot".into(), "get_temp".into()];
+        let mut ui = Ui {
+            history: vec!["get_status".into(), "reboot".into(), "get_temp".into()],
+            ..Default::default()
+        };
         ui.set_input("gst");
         assert_eq!(ui.suggestion.as_deref(), Some("get_status"));
     }
 
     #[test]
     fn suggestion_skips_exact_input_and_empty() {
-        let mut ui = Ui::default();
-        ui.history = vec!["reboot".into()];
+        let mut ui = Ui {
+            history: vec!["reboot".into()],
+            ..Default::default()
+        };
         ui.set_input("reboot");
         assert_eq!(ui.suggestion, None);
         ui.clear_input();
@@ -567,7 +671,7 @@ mod tests {
         }
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        draw(&mut terminal, &ui, "COM11", 115200).unwrap();
+        draw(&mut terminal, &ui, "COM11", 115200, None).unwrap();
         let buf = terminal.backend().buffer();
 
         // The 3-row input box sits at the bottom, with the output box's own bottom border just

@@ -40,6 +40,18 @@ impl SessionLog {
         self.entry("TX", &format!("<{label}>"))
     }
 
+    // Input injected by an MCP client, marked so the log distinguishes it from
+    // what a person typed while still recording it as sent to the board.
+    pub fn tx_agent(&mut self, bytes: &[u8]) -> Result<()> {
+        let text = String::from_utf8_lossy(bytes);
+        self.entry("TX", &format!("[mcp] {}", escape(&text)))
+    }
+
+    // A smon side note, such as the MCP server binding or failing to bind.
+    pub fn system(&mut self, text: &str) -> Result<()> {
+        self.entry("SYS", text)
+    }
+
     fn entry(&mut self, dir: &str, text: &str) -> Result<()> {
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         writeln!(self.file, "{ts}  {dir}  {text}")?;
