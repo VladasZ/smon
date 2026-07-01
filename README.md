@@ -72,12 +72,35 @@ Logs are stored in:
 - `$XDG_STATE_HOME/smon/logs/` on Linux and macOS, or `~/.local/state/smon/logs/`
 - `%LOCALAPPDATA%\smon\logs\` on Windows
 
+While a session is running its log file is held open, so on Windows the size and
+last write time shown by a directory listing are stale. Windows does not flush
+them to the directory entry until the file is closed. `dir`, `ls` and
+`Get-ChildItem` can report the active log as 0 bytes or with an old timestamp
+even while bytes are being written to it. Do not decide a log is empty or
+unchanged from its listed size or time. Read the file contents.
+
 ### Config file
 
 The baud per port and the command history live in `config.json`, found in:
 
 - `$XDG_CONFIG_HOME/smon/` or `~/.config/smon/` on Linux and macOS
 - `%APPDATA%\smon\` on Windows
+
+## MCP server
+
+smon also serves a small [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint, so an agent or any MCP client can drive the serial console the same way
+you can at the TUI. It exposes generic serial tools only, such as `serial_send`,
+`serial_read`, and `serial_expect`, with no knowledge of any device.
+
+It is always on and listens on `http://127.0.0.1:4123/mcp` over Streamable HTTP,
+localhost only. Change the bind with `--mcp`:
+
+```
+smon --mcp 127.0.0.1:5000
+```
+
+See [docs/mcp.md](docs/mcp.md) for the tool list and how to connect a client.
 
 ## Testing with a fake device
 
