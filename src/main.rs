@@ -5,7 +5,9 @@ use ratatui::DefaultTerminal;
 use serialport::{SerialPortType, available_ports};
 
 mod config;
+mod log;
 mod picker;
+mod probe;
 mod session;
 mod wsl;
 
@@ -13,27 +15,51 @@ const ATTACH_SENTINEL: &str = "\0usbipd-attach:";
 const DEFAULT_BAUD: u32 = 115200;
 
 fn main() -> Result<()> {
+    let eol = parse_eol()?;
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal);
+    let result = run(&mut terminal, &eol);
     ratatui::restore();
     result
 }
 
-fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, eol: &[u8]) -> Result<()> {
     loop {
         let Some(port) = select_port(terminal)? else {
             return Ok(());
         };
-        let Some(baud) = pick_baud(terminal)? else {
+        let Some(baud) = pick_baud(terminal, &port)? else {
             continue; // cancelling the baud picker returns to port selection
         };
-        config::Config { baud: Some(baud) }.save()?;
-        return session::run(terminal, &port, baud);
+        let mut config = config::Config::load();
+        config.baud.insert(port.clone(), baud);
+        config.save()?;
+        return session::run(terminal, &port, baud, eol);
     }
 }
 
-fn pick_baud(terminal: &mut DefaultTerminal) -> Result<Option<u32>> {
+fn parse_eol() -> Result<Vec<u8>> {
+    let mut args = std::env::args().skip(1);
+    let mut value: Option<String> = None;
+    while let Some(arg) = args.next() {
+        if let Some(v) = arg.strip_prefix("--eol=") {
+            value = Some(v.to_string());
+        } else if arg == "--eol" {
+            value = args.next();
+        }
+    }
+
+    Ok(match value.as_deref().unwrap_or("crlf") {
+        "cr" => b"\r".to_vec(),
+        "lf" => b"\n".to_vec(),
+        "crlf" => b"\r\n".to_vec(),
+        "none" => Vec::new(),
+        other => anyhow::bail!("invalid --eol '{other}', expected one of: cr lf crlf none"),
+    })
+}
+
+fn pick_baud(terminal: &mut DefaultTerminal, port: &str) -> Result<Option<u32>> {
     let config = config::Config::load();
+    let saved = config.baud.get(port).copied();
 
     let bauds: [u32; 8] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
     let baud_items: Vec<picker::Item> = bauds
@@ -41,14 +67,15 @@ fn pick_baud(terminal: &mut DefaultTerminal) -> Result<Option<u32>> {
         .map(|b| picker::Item {
             value: b.to_string(),
             label: b.to_string(),
+            busy: false,
         })
         .collect();
 
     let Some(choice) = picker::pick(
         terminal,
         "Select baud rate",
-        &baud_items,
-        default_baud_index(&bauds, config.baud),
+        || baud_items.clone(),
+        default_baud_index(&bauds, saved),
         false,
     )?
     else {
@@ -71,24 +98,26 @@ fn select_port(terminal: &mut DefaultTerminal) -> Result<Option<String>> {
     let mut notice: Option<String> = None;
 
     loop {
-        let mut items = serial_port_items();
-        let port_count = items.len();
-
-        if let Some(u) = &usbipd {
-            for device in u.serial_devices() {
-                items.push(picker::Item {
-                    value: format!("{ATTACH_SENTINEL}{}", device.busid),
-                    label: device.attach_label(),
-                });
-            }
-        }
-
         let title = match &notice {
             Some(msg) => format!("Select serial port  --  {msg}"),
             None => "Select serial port".to_string(),
         };
 
-        let value = match picker::pick(terminal, &title, &items, None, true)? {
+        let make_items = || {
+            let mut items = serial_port_items();
+            if let Some(u) = &usbipd {
+                for device in u.serial_devices() {
+                    items.push(picker::Item {
+                        value: format!("{ATTACH_SENTINEL}{}", device.busid),
+                        label: device.attach_label(),
+                        busy: false,
+                    });
+                }
+            }
+            items
+        };
+
+        let value = match picker::pick(terminal, &title, make_items, None, true)? {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -100,7 +129,7 @@ fn select_port(terminal: &mut DefaultTerminal) -> Result<Option<String>> {
         if let Some(u) = &usbipd {
             match u.attach(busid) {
                 Ok(()) => {
-                    wait_for_new_ports(port_count);
+                    wait_for_new_ports(serial_port_items().len());
                     notice = Some(format!("attached {busid}"));
                 }
                 Err(e) => notice = Some(e.to_string()),
@@ -110,7 +139,8 @@ fn select_port(terminal: &mut DefaultTerminal) -> Result<Option<String>> {
 }
 
 fn serial_port_items() -> Vec<picker::Item> {
-    available_ports()
+    let lock = probe::Lock::acquire();
+    let mut items: Vec<picker::Item> = available_ports()
         .unwrap_or_default()
         .into_iter()
         .map(|p| {
@@ -123,12 +153,29 @@ fn serial_port_items() -> Vec<picker::Item> {
                 SerialPortType::PciPort => format!("{}  (PCI)", p.port_name),
                 SerialPortType::Unknown => p.port_name.clone(),
             };
+            let busy = probe::is_busy(&p.port_name);
             picker::Item {
                 value: p.port_name,
                 label,
+                busy,
             }
         })
-        .collect()
+        .collect();
+    drop(lock);
+    items.sort_by_key(|a| port_sort_key(&a.value));
+    items
+}
+
+// Sort COM9 before COM10: split the trailing number off the name so it compares numerically
+// instead of lexically.
+fn port_sort_key(name: &str) -> (String, Option<u64>) {
+    let digits = name
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    let (prefix, number) = name.split_at(name.len() - digits);
+    (prefix.to_string(), number.parse().ok())
 }
 
 fn wait_for_new_ports(baseline: usize) {
@@ -155,5 +202,12 @@ mod tests {
     fn missing_or_unsaved_baud_falls_back_to_default() {
         assert_eq!(default_baud_index(&BAUDS, None), Some(4)); // 115200
         assert_eq!(default_baud_index(&BAUDS, Some(12345)), Some(4));
+    }
+
+    #[test]
+    fn ports_sort_numerically_not_lexically() {
+        let mut names = vec!["COM10", "COM9", "COM1"];
+        names.sort_by(|a, b| port_sort_key(a).cmp(&port_sort_key(b)));
+        assert_eq!(names, ["COM1", "COM9", "COM10"]);
     }
 }
