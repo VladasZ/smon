@@ -90,5 +90,5 @@ the Windows side; inside WSL it is `/dev/ttyUSB*`.
 
 ## Quitting smon
 
-`Ctrl+Q` quits (works on any keyboard layout). `Ctrl+]` also quits but only on
-layouts where `]` is a direct key.
+`Ctrl+Q` quits and works on any keyboard layout. `Ctrl+]` does not quit, it
+passes through to the device as a control byte like any other Ctrl combo.

@@ -1,13 +1,14 @@
 use std::{
-    io::{Read, Write},
+    collections::VecDeque,
+    io::{self, Error, ErrorKind, Read},
     mem::take,
     net::SocketAddr,
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
-    thread,
-    time::Duration,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -22,15 +23,20 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use serialport::SerialPort;
+use tokio::sync::{mpsc::unbounded_channel, oneshot};
 
 use crate::{
     config,
     log::SessionLog,
-    mcp::{self, Inject, Shared},
+    mcp::{self, Inject, Shared, ctrl_byte},
     probe::Lock,
 };
 
 const MAX_LINES: usize = 5000;
+const RECONNECT_EVERY: Duration = Duration::from_secs(1);
+// A board asserting flow control can stall writes briefly, which is normal. Only
+// a stall this long with no progress at all is treated as a dead port.
+const WRITE_STALL_LIMIT: Duration = Duration::from_secs(5);
 
 enum Origin {
     Rx,
@@ -46,7 +52,7 @@ struct OutLine {
 
 #[derive(Default)]
 struct Ui {
-    lines: Vec<OutLine>,
+    lines: VecDeque<OutLine>,
     rx_partial: String,
     input: Vec<char>,
     cursor: usize,
@@ -72,7 +78,7 @@ impl Ui {
     }
 
     fn end_line(&mut self) {
-        self.lines.push(OutLine {
+        self.lines.push_back(OutLine {
             origin: Origin::Rx,
             text: take(&mut self.rx_partial),
         });
@@ -82,8 +88,8 @@ impl Ui {
         self.push_out(Origin::Tx, text);
     }
 
-    // Injected input and smon notices join the same scrollback, so the person at
-    // the TUI sees exactly what an MCP client did, in order with everything else.
+    // Injected input joins the same scrollback, so the person at the TUI sees
+    // exactly what an MCP client did, in order with everything else.
     fn echo_agent(&mut self, text: &str) {
         self.push_out(Origin::Agent, text);
     }
@@ -96,7 +102,7 @@ impl Ui {
         if !self.rx_partial.is_empty() {
             self.end_line();
         }
-        self.lines.push(OutLine {
+        self.lines.push_back(OutLine {
             origin,
             text: text.to_string(),
         });
@@ -104,9 +110,8 @@ impl Ui {
     }
 
     fn cap_lines(&mut self) {
-        if self.lines.len() > MAX_LINES {
-            let drop = self.lines.len() - MAX_LINES;
-            self.lines.drain(..drop);
+        while self.lines.len() > MAX_LINES {
+            self.lines.pop_front();
         }
     }
 
@@ -209,13 +214,34 @@ impl Ui {
     }
 }
 
-pub fn run(
-    terminal: &mut DefaultTerminal,
+/// Everything the session hears back from the port threads.
+enum PortEvent {
+    Rx(Vec<u8>),
+    Dead(String),
+}
+
+/// A write queued for the writer thread. `resp` reports the result back to an
+/// MCP client. Keyboard writes have no listener.
+struct WriteReq {
+    bytes: Vec<u8>,
+    resp:  Option<oneshot::Sender<Result<(), String>>>,
+}
+
+/// One open port and its reader and writer threads. Dropped and rebuilt on
+/// every disconnect.
+struct Connection {
+    writer_tx: Sender<WriteReq>,
+    stop_tx:   Sender<()>,
+    reader:    JoinHandle<()>,
+    writer:    JoinHandle<()>,
+}
+
+fn connect(
     port_name: &str,
     baud: u32,
-    eol: &[u8],
-    mcp_bind: SocketAddr,
-) -> Result<()> {
+    events: &Sender<PortEvent>,
+    state: &Arc<Shared>,
+) -> Result<Connection> {
     // Hold the probe lock across the open so another instance's port probe can't briefly grab
     // the port at the same instant and make this open fail with access-denied.
     let opened = {
@@ -226,28 +252,83 @@ pub fn run(
         drop(lock);
         result
     };
-    let mut port = opened.with_context(|| format!("opening {port_name} @ {baud}"))?;
-
-    let mut log = SessionLog::create(port_name)?;
-
-    let reader = port
+    let port = opened.with_context(|| format!("opening {port_name} @ {baud}"))?;
+    let reader_port = port
         .try_clone()
         .context("cloning serial port for reader thread")?;
 
-    let (rx_tx, rx_rx) = mpsc::channel::<Vec<u8>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (writer_tx, writer_rx) = mpsc::channel::<WriteReq>();
 
-    // Shared serial-console state the MCP server reads and writes through. The reader thread feeds
-    // it received bytes; MCP tools queue input on the inject channel, which this loop drains and
-    // writes to the port, so the port is only ever written from one place.
-    let (inject_tx, mut inject_rx) = tokio::sync::mpsc::unbounded_channel::<Inject>();
+    let reader_events = events.clone();
+    let reader_state = Arc::clone(state);
+    let reader =
+        thread::spawn(move || reader_loop(reader_port, reader_events, stop_rx, reader_state));
+
+    let writer_events = events.clone();
+    let writer = thread::spawn(move || writer_loop(port, writer_rx, writer_events));
+
+    Ok(Connection {
+        writer_tx,
+        stop_tx,
+        reader,
+        writer,
+    })
+}
+
+// Stop both port threads and wait for them. The reader notices the stop signal
+// within its read timeout. The writer exits when its queue sender is dropped.
+fn teardown(conn: Connection) {
+    let _ = conn.stop_tx.send(());
+    drop(conn.writer_tx);
+    let _ = conn.reader.join();
+    let _ = conn.writer.join();
+}
+
+// Queue keyboard bytes for the writer thread. While the port is disconnected
+// the input is dropped with a note instead of piling up for a dead port.
+fn queue_write(
+    conn: &Option<Connection>,
+    ui: &mut Ui,
+    log: &mut SessionLog,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    if let Some(c) = conn
+        && c.writer_tx.send(WriteReq { bytes, resp: None }).is_ok()
+    {
+        return Ok(());
+    }
+    let note = "port disconnected, input not sent";
+    ui.push_system(note);
+    log.system(note)?;
+    Ok(())
+}
+
+pub fn run(
+    terminal: &mut DefaultTerminal,
+    port_name: &str,
+    baud: u32,
+    eol: &[u8],
+    mcp_bind: SocketAddr,
+) -> Result<()> {
+    let (event_tx, event_rx) = mpsc::channel::<PortEvent>();
+
+    // Shared serial-console state the MCP server reads and writes through. The
+    // reader thread feeds it received bytes. MCP tools queue input on the inject
+    // channel, which this loop forwards to the writer thread, so the port is
+    // only ever written from one place.
+    let (inject_tx, mut inject_rx) = unbounded_channel::<Inject>();
     let state = Shared::new(port_name.to_string(), baud, eol.to_vec(), inject_tx);
 
-    let reader_state = Arc::clone(&state);
-    let reader_thread = thread::spawn(move || reader_loop(reader, rx_tx, stop_rx, reader_state));
+    // The first open must succeed so a bad pick fails fast back at the picker.
+    // Failures after that go through the reconnect loop instead of ending the
+    // session and losing the scrollback.
+    let mut conn = Some(connect(port_name, baud, &event_tx, &state)?);
+
+    let mut log = SessionLog::create(port_name)?;
 
     let (ready_tx, ready_rx) = mpsc::channel::<Result<SocketAddr, String>>();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server_thread = mcp::spawn(mcp_bind, Arc::clone(&state), ready_tx, shutdown_rx);
 
     let mut config = config::Config::load();
@@ -255,83 +336,109 @@ pub fn run(
         history: config.history.clone(),
         ..Default::default()
     };
-    let mut mcp_status: Option<SocketAddr> = None;
-    let mut error: Option<String> = None;
+    let mut last_attempt = Instant::now();
+    let mut dirty = true;
 
     loop {
-        loop {
-            match rx_rx.try_recv() {
-                Ok(bytes) => {
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                PortEvent::Rx(bytes) => {
                     log.rx(&bytes)?;
                     ui.push_rx(&bytes);
+                    dirty = true;
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error = Some("reader thread disconnected".to_string());
-                    break;
+                PortEvent::Dead(reason) => {
+                    // Both port threads report fatal errors here. Only the first
+                    // report tears the connection down.
+                    if let Some(c) = conn.take() {
+                        teardown(c);
+                        state.set_connected(false);
+                        let note = format!("{reason}, reconnecting");
+                        ui.push_system(&note);
+                        log.system(&note)?;
+                        last_attempt = Instant::now();
+                        dirty = true;
+                    }
                 }
             }
         }
 
-        // Report the MCP bind result once it arrives, as a scrollback notice and in the log.
+        // Log the MCP bind result once it arrives. The MCP endpoint is for agents,
+        // so it goes to the session log only and is never shown in the TUI.
         if let Ok(result) = ready_rx.try_recv() {
             let note = match result {
-                Ok(addr) => {
-                    mcp_status = Some(addr);
-                    format!("mcp serving http://{addr}/mcp")
-                }
+                Ok(addr) => format!("mcp serving http://{addr}/mcp"),
                 Err(e) => format!("mcp disabled: {e}"),
             };
-            ui.push_system(&note);
             log.system(&note)?;
         }
 
-        // Write input queued by MCP clients, echoing and logging it like a keystroke.
+        // Forward input queued by MCP clients, echoing and logging it like a
+        // keystroke. While disconnected the client gets an error instead.
         while let Ok(inject) = inject_rx.try_recv() {
-            match port.write_all(&inject.bytes) {
-                Ok(()) => {
-                    ui.echo_agent(&inject.echo);
-                    log.tx_agent(&inject.bytes)?;
-                    let _ = inject.resp.send(Ok(()));
-                }
-                Err(e) => {
-                    let msg = format!("write error: {e}");
-                    let _ = inject.resp.send(Err(msg.clone()));
-                    state.set_connected(false);
-                    error = Some(msg);
-                    break;
-                }
+            let Some(c) = &conn else {
+                let _ = inject.resp.send(Err("port disconnected".to_string()));
+                continue;
+            };
+            ui.echo_agent(&inject.echo);
+            log.tx_agent(&inject.bytes)?;
+            dirty = true;
+            let req = WriteReq {
+                bytes: inject.bytes,
+                resp:  Some(inject.resp),
+            };
+            if let Err(back) = c.writer_tx.send(req)
+                && let Some(resp) = back.0.resp
+            {
+                let _ = resp.send(Err("port disconnected".to_string()));
             }
         }
 
-        draw(terminal, &ui, port_name, baud, mcp_status)?;
+        if conn.is_none() && last_attempt.elapsed() >= RECONNECT_EVERY {
+            match connect(port_name, baud, &event_tx, &state) {
+                Ok(c) => {
+                    conn = Some(c);
+                    state.set_connected(true);
+                    ui.push_system("reconnected");
+                    log.system("reconnected")?;
+                    dirty = true;
+                }
+                // Logging every failed attempt would add a line each second for
+                // as long as the device stays unplugged, so retries are silent.
+                Err(_) => last_attempt = Instant::now(),
+            }
+        }
 
-        if error.is_some() {
-            break;
+        // Redraw only when state changed. An unconditional draw on every 16ms
+        // tick re-wrapped the scrollback at 60 fps and burned most of a core.
+        if dirty {
+            draw(terminal, &ui, port_name, baud, conn.is_some())?;
+            dirty = false;
         }
 
         if !event::poll(Duration::from_millis(16))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            // a resize invalidates the frame even though no state changed.
+            Event::Resize(_, _) => {
+                dirty = true;
+                continue;
+            }
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
         if is_quit(&key) {
             break;
         }
+        dirty = true;
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char(c) if ctrl => {
-                if let Some(bytes) = ctrl_bytes(c) {
+                if let Some(byte) = ctrl_byte(c) {
                     log.tx_key(&format!("Ctrl+{}", c.to_ascii_uppercase()))?;
-                    if let Err(e) = port.write_all(&bytes) {
-                        error = Some(format!("write error: {e}"));
-                        break;
-                    }
+                    queue_write(&conn, &mut ui, &mut log, vec![byte])?;
                 }
             }
             KeyCode::Char(c) => ui.insert(c),
@@ -340,17 +447,19 @@ pub fn run(
                 let text = ui.take_input();
                 if !text.is_empty() {
                     config.record_command(&text);
-                    config.save()?;
+                    // A failed save is worth a note, not the end of the session.
+                    if let Err(e) = config.save() {
+                        let note = format!("config save failed: {e}");
+                        ui.push_system(&note);
+                        log.system(&note)?;
+                    }
                     ui.history = config.history.clone();
                 }
                 ui.echo_tx(&text);
                 let mut bytes = text.into_bytes();
                 bytes.extend_from_slice(eol);
                 log.tx_line(&bytes)?;
-                if let Err(e) = port.write_all(&bytes) {
-                    error = Some(format!("write error: {e}"));
-                    break;
-                }
+                queue_write(&conn, &mut ui, &mut log, bytes)?;
             }
             KeyCode::Backspace => ui.backspace(),
             KeyCode::Delete => ui.delete(),
@@ -370,16 +479,14 @@ pub fn run(
     }
 
     let _ = shutdown_tx.send(());
-    let _ = stop_tx.send(());
-    let _ = reader_thread.join();
+    if let Some(c) = conn.take() {
+        teardown(c);
+    }
     // The MCP server thread is detached, not joined: a client holding an SSE
     // stream open can keep graceful shutdown from returning, so we signal it and
     // let process exit reap it rather than block quit on a client.
     drop(server_thread);
 
-    if let Some(e) = error {
-        anyhow::bail!(e);
-    }
     Ok(())
 }
 
@@ -388,15 +495,16 @@ fn draw<B: Backend>(
     ui: &Ui,
     port_name: &str,
     baud: u32,
-    mcp: Option<SocketAddr>,
+    connected: bool,
 ) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let border = Style::new().fg(Color::DarkGray);
-    let title = match mcp {
-        Some(addr) => format!(" {port_name} @ {baud}   mcp {addr} "),
-        None => format!(" {port_name} @ {baud} "),
+    let title = if connected {
+        format!(" {port_name} @ {baud} ")
+    } else {
+        format!(" {port_name} @ {baud}  --  disconnected, retrying ")
     };
 
     terminal.draw(|frame| {
@@ -409,44 +517,51 @@ where
         let out_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border)
-            .title(Line::from(title.clone()))
+            .title(Line::from(title))
             .title(Line::from(" ctrl+q: quit ").right_aligned());
         let out_inner = out_block.inner(out_area);
         frame.render_widget(out_block, out_area);
 
         let height = out_inner.height as usize;
 
-        let mut rendered: Vec<Line> = Vec::with_capacity(ui.lines.len() + 1);
-        for line in &ui.lines {
-            let (text, style) = match line.origin {
-                Origin::Rx => (line.text.clone(), Style::default()),
-                Origin::Tx => (format!("> {}", line.text), Style::new().fg(Color::Cyan)),
-                Origin::Agent => (format!(">> {}", line.text), Style::new().fg(Color::Magenta)),
-                Origin::System => (format!("-- {}", line.text), Style::new().fg(Color::DarkGray)),
-            };
-            rendered.push(Line::styled(text, style));
-        }
+        // Build and wrap only the newest lines that can reach the viewport. The view is always
+        // pinned to the bottom, so anything older can never show, and wrapping the whole capped
+        // history on every frame used to burn most of a core.
+        let mut tail: Vec<Line> = Vec::new();
+        let mut rows = 0usize;
         if !ui.rx_partial.is_empty() {
-            rendered.push(Line::from(ui.rx_partial.clone()));
+            let line = Line::from(ui.rx_partial.clone());
+            rows += wrapped_rows(&line, out_inner.width);
+            tail.push(line);
         }
+        for line in ui.lines.iter().rev() {
+            if rows >= height {
+                break;
+            }
+            let styled = style_line(line);
+            rows += wrapped_rows(&styled, out_inner.width);
+            tail.push(styled);
+        }
+        let shown = tail.len();
+        tail.reverse();
 
-        // Ask the paragraph itself how many rows it wraps to at this width. A hand-rolled
-        // ceil(chars / width) estimate drifts from the word-wrapper, which drops whitespace at
-        // wrap boundaries, so on wide terminals it over-counts and the scroll overshoots the
-        // real bottom, leaving the newest lines stranded at the top with blank space below.
-        let paragraph = Paragraph::new(Text::from(rendered)).wrap(Wrap { trim: false });
-        let rows = paragraph.line_count(out_inner.width);
+        let paragraph = Paragraph::new(Text::from(tail)).wrap(Wrap { trim: false });
         let scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
         frame.render_widget(paragraph.scroll((scroll, 0)), out_inner);
 
-        // Only show the scrollbar when content actually overflows. content_length is the number
-        // of scroll positions (rows - viewport), NOT the total row count: the thumb reaches the
-        // bottom only when position == content_length, and a paragraph's scroll maxes out at
-        // rows - viewport. viewport_content_length sizes the thumb to the visible fraction.
-        if rows > height {
-            let mut sb_state = ScrollbarState::new(rows - height)
+        // Only show the scrollbar when content actually overflows. Lines left out of the tail
+        // wrap to at least one row each, which bounds the total row count from below without
+        // wrapping them. The thumb stays pinned to the bottom, only its size is approximate.
+        // content_length is the number of scroll positions, NOT the total row count: the thumb
+        // reaches the bottom only when position == content_length, and the bottom-pinned view
+        // is always at that maximum. viewport_content_length sizes the thumb to the visible
+        // fraction.
+        let total = ui.lines.len() + usize::from(!ui.rx_partial.is_empty());
+        let total_rows = rows + (total - shown);
+        if total_rows > height {
+            let mut sb_state = ScrollbarState::new(total_rows - height)
                 .viewport_content_length(height)
-                .position(scroll as usize);
+                .position(total_rows - height);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
@@ -497,9 +612,29 @@ where
     Ok(())
 }
 
+fn style_line(line: &OutLine) -> Line<'static> {
+    let (text, style) = match line.origin {
+        Origin::Rx => (line.text.clone(), Style::default()),
+        Origin::Tx => (format!("> {}", line.text), Style::new().fg(Color::Cyan)),
+        Origin::Agent => (format!(">> {}", line.text), Style::new().fg(Color::Magenta)),
+        Origin::System => (format!("-- {}", line.text), Style::new().fg(Color::DarkGray)),
+    };
+    Line::styled(text, style)
+}
+
+// Ask the paragraph itself how many rows the line wraps to at this width. A hand-rolled
+// ceil of chars over width drifts from the word-wrapper, which drops whitespace at wrap
+// boundaries, so on wide terminals it over-counts and the scroll overshoots the real
+// bottom, leaving the newest lines stranded at the top with blank space below.
+fn wrapped_rows(line: &Line, width: u16) -> usize {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
 fn reader_loop(
     mut port: Box<dyn SerialPort>,
-    tx: Sender<Vec<u8>>,
+    events: Sender<PortEvent>,
     stop_rx: Receiver<()>,
     state: Arc<Shared>,
 ) {
@@ -507,7 +642,7 @@ fn reader_loop(
     loop {
         if matches!(
             stop_rx.try_recv(),
-            Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+            Ok(()) | Err(TryRecvError::Disconnected)
         ) {
             return;
         }
@@ -517,36 +652,66 @@ fn reader_loop(
                 // Feed the MCP buffer straight from the reader so expect() sees bytes without
                 // waiting on the ~16ms UI tick.
                 state.push_rx(&buf[..n]);
-                if tx.send(buf[..n].to_vec()).is_err() {
+                if events.send(PortEvent::Rx(buf[..n].to_vec())).is_err() {
                     return;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => {
-                state.set_connected(false);
+            Err(e) if e.kind() == ErrorKind::TimedOut => {}
+            Err(e) => {
+                let _ = events.send(PortEvent::Dead(format!("read error: {e}")));
                 return;
             }
         }
     }
 }
 
+fn writer_loop(mut port: Box<dyn SerialPort>, reqs: Receiver<WriteReq>, events: Sender<PortEvent>) {
+    while let Ok(req) = reqs.recv() {
+        match write_with_retry(port.as_mut(), &req.bytes) {
+            Ok(()) => {
+                if let Some(resp) = req.resp {
+                    let _ = resp.send(Ok(()));
+                }
+            }
+            Err(e) => {
+                let msg = format!("write error: {e}");
+                if let Some(resp) = req.resp {
+                    let _ = resp.send(Err(msg.clone()));
+                }
+                let _ = events.send(PortEvent::Dead(msg));
+                return;
+            }
+        }
+    }
+}
+
+// Retry timed-out writes until the stall limit, resetting the clock whenever any
+// bytes go through, so slow trickling progress is not mistaken for a dead port.
+fn write_with_retry(port: &mut dyn SerialPort, bytes: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    let mut deadline = Instant::now() + WRITE_STALL_LIMIT;
+    while written < bytes.len() {
+        match port.write(&bytes[written..]) {
+            Ok(0) => return Err(Error::new(ErrorKind::WriteZero, "wrote zero bytes")),
+            Ok(n) => {
+                written += n;
+                deadline = Instant::now() + WRITE_STALL_LIMIT;
+            }
+            Err(e) if e.kind() == ErrorKind::TimedOut => {
+                if Instant::now() >= deadline {
+                    return Err(Error::new(ErrorKind::TimedOut, "write stalled"));
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 fn is_quit(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-}
-
-fn ctrl_bytes(c: char) -> Option<Vec<u8>> {
-    let lower = c.to_ascii_lowercase();
-    Some(match lower {
-        'a'..='z' => vec![(lower as u8) - b'a' + 1],
-        '@' => vec![0],
-        '[' => vec![0x1b],
-        '\\' => vec![0x1c],
-        ']' => vec![0x1d],
-        '^' => vec![0x1e],
-        '_' => vec![0x1f],
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -575,13 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_maps_to_interrupt_byte() {
-        assert_eq!(ctrl_bytes('c'), Some(vec![3]));
-        assert_eq!(ctrl_bytes('['), Some(vec![0x1b]));
-        assert_eq!(ctrl_bytes('1'), None);
-    }
-
-    #[test]
     fn history_recall_walks_back_and_forward() {
         let mut ui = Ui {
             history: vec!["first".into(), "second".into()],
@@ -605,6 +763,16 @@ mod tests {
         assert_eq!(ui.lines.len(), 1);
         assert_eq!(ui.lines[0].text, "hello");
         assert_eq!(ui.rx_partial, "wor");
+    }
+
+    #[test]
+    fn scrollback_is_capped_from_the_front() {
+        let mut ui = Ui::default();
+        for i in 0..(MAX_LINES + 10) {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        assert_eq!(ui.lines.len(), MAX_LINES);
+        assert_eq!(ui.lines[0].text, "line 10");
     }
 
     #[test]
@@ -671,7 +839,7 @@ mod tests {
         }
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        draw(&mut terminal, &ui, "COM11", 115200, None).unwrap();
+        draw(&mut terminal, &ui, "COM11", 115200, true).unwrap();
         let buf = terminal.backend().buffer();
 
         // The 3-row input box sits at the bottom, with the output box's own bottom border just

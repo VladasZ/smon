@@ -41,11 +41,26 @@ impl Config {
         let Some(path) = config_path() else {
             return Ok(());
         };
+        // Merge into the file's current contents rather than overwriting, so two
+        // running instances do not wipe each other's saved bauds and history.
+        let merged = self.merged_into(Config::load());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_json::to_string_pretty(&merged)?)?;
         Ok(())
+    }
+
+    // Our entries win for ports we changed and rank freshest in history. Without
+    // timestamps this is the best recency guess either instance can make.
+    fn merged_into(&self, mut disk: Config) -> Config {
+        for (port, baud) in &self.baud {
+            disk.baud.insert(port.clone(), *baud);
+        }
+        for cmd in &self.history {
+            disk.record_command(cmd);
+        }
+        disk
     }
 }
 
@@ -71,4 +86,34 @@ fn config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .map(|home| home.join(".config"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_merges_disk_entries_instead_of_overwriting() {
+        let mut disk = Config::default();
+        disk.baud.insert("COM3".to_string(), 9600);
+        disk.history = vec!["from_other".to_string()];
+
+        let mut ours = Config::default();
+        ours.baud.insert("COM4".to_string(), 115200);
+        ours.record_command("ours");
+
+        let merged = ours.merged_into(disk);
+        assert_eq!(merged.baud["COM3"], 9600);
+        assert_eq!(merged.baud["COM4"], 115200);
+        assert_eq!(merged.history, ["from_other", "ours"]);
+    }
+
+    #[test]
+    fn record_command_dedupes_and_moves_to_end() {
+        let mut config = Config::default();
+        config.record_command("a");
+        config.record_command("b");
+        config.record_command("a");
+        assert_eq!(config.history, ["b", "a"]);
+    }
 }

@@ -3,7 +3,7 @@
 //!
 //! The serial session feeds received bytes into a rolling buffer here, and MCP
 //! tools read that buffer and queue input back through an inject channel that
-//! the session drains onto the port. All board-specific behaviour belongs in a
+//! the session forwards to its port writer. All board-specific behaviour belongs in a
 //! separate MCP server that uses these generic tools as a client.
 
 use std::{
@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use memchr::memmem;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
@@ -32,7 +33,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender, oneshot};
 
 // Rolling buffer cap. At 115200 baud the console fills slowly, so a few hundred
 // KB keeps enough scrollback that expect() can still find a line that scrolled
-// past a moment ago.
+// past a moment ago. The buffer can grow to twice this before it is trimmed.
 const RING_CAP: usize = 512 * 1024;
 
 // Hard ceiling on a single expect() wait, so one call cannot block a client
@@ -76,7 +77,10 @@ impl Ring {
 
     fn append(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
-        if self.buf.len() > RING_CAP {
+        // Trim in large chunks. Draining on every append would shift the whole
+        // buffer for each received chunk once full. Letting it grow to twice the
+        // cap first makes the shift amortized O(1) per byte.
+        if self.buf.len() > RING_CAP * 2 {
             let drop = self.buf.len() - RING_CAP;
             self.buf.drain(..drop);
             self.base += drop as u64;
@@ -114,24 +118,29 @@ impl Matcher {
     // Offset just past the first match in `hay`, or None.
     fn find_end(&self, hay: &[u8]) -> Option<usize> {
         match self {
-            Matcher::Substr(needle) => find_sub(hay, needle).map(|i| i + needle.len()),
+            Matcher::Substr(needle) => memmem::find(hay, needle).map(|i| i + needle.len()),
             Matcher::Regex(re) => re.find(hay).map(|m| m.end()),
+        }
+    }
+
+    // Where the next scan can resume after a miss that ended at absolute offset
+    // `end`. A substring hit can straddle the scanned region's edge by at most
+    // needle length minus one, so scanning restarts just before it. A regex can
+    // match a span of any length, so it rescans from `start` every time.
+    fn resume_from(&self, start: u64, end: u64) -> u64 {
+        match self {
+            Matcher::Substr(needle) => {
+                let overlap = needle.len().saturating_sub(1) as u64;
+                end.saturating_sub(overlap).max(start)
+            }
+            Matcher::Regex(_) => start,
         }
     }
 }
 
-fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > hay.len() {
-        return None;
-    }
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
-// The control byte for Ctrl+<c>, matching the mapping the TUI uses for keystrokes.
-fn ctrl_byte(c: char) -> Option<u8> {
+/// The control byte for Ctrl+<c>. One shared mapping serves both the TUI
+/// keystrokes and the MCP serial_send_ctrl tool, so they cannot drift apart.
+pub fn ctrl_byte(c: char) -> Option<u8> {
     let lower = c.to_ascii_lowercase();
     Some(match lower {
         'a'..='z' => (lower as u8) - b'a' + 1,
@@ -200,10 +209,29 @@ impl Shared {
     /// The last `lines` complete lines currently in the buffer.
     pub fn snapshot(&self, lines: usize) -> String {
         let ring = self.ring.lock().unwrap();
-        let text = String::from_utf8_lossy(&ring.buf);
-        let all: Vec<&str> = text.lines().collect();
-        let start = all.len().saturating_sub(lines);
-        all[start..].join("\n")
+        if lines == 0 {
+            return String::new();
+        }
+        // Scan backwards for the newline where the requested tail starts, so the
+        // cost tracks the answer size instead of the whole retained buffer. A
+        // trailing newline only terminates the last line, it does not start a
+        // new one.
+        let buf = &ring.buf;
+        let end = buf.len() - usize::from(buf.last() == Some(&b'\n'));
+        let mut count = 0;
+        let mut start = 0;
+        for i in (0..end).rev() {
+            if buf[i] == b'\n' {
+                count += 1;
+                if count == lines {
+                    start = i + 1;
+                    break;
+                }
+            }
+        }
+        let tail = String::from_utf8_lossy(&buf[start..]);
+        let all: Vec<&str> = tail.lines().collect();
+        all.join("\n")
     }
 
     /// Port name, baud, whether the port is still connected, and the current
@@ -269,6 +297,9 @@ impl Shared {
         let matcher = Matcher::build(pattern, regex)?;
         let start = cursor.unwrap_or_else(|| self.total());
         let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_EXPECT_MS));
+        // Each scan resumes near where the previous one ended instead of
+        // rescanning everything from `start` for every received chunk.
+        let mut scan_from = start;
 
         loop {
             // Register interest before scanning so a byte that arrives between
@@ -279,15 +310,19 @@ impl Shared {
 
             {
                 let ring = self.ring.lock().unwrap();
-                let (abs, hay) = ring.slice_from(start);
-                if let Some(end) = matcher.find_end(hay) {
+                let (scan_abs, scan_hay) = ring.slice_from(scan_from);
+                if let Some(end) = matcher.find_end(scan_hay) {
+                    let match_end = scan_abs + end as u64;
+                    let (abs, hay) = ring.slice_from(start);
+                    let data = &hay[..(match_end - abs) as usize];
                     return Ok(Expect {
                         matched:   true,
-                        data:      String::from_utf8_lossy(&hay[..end]).into_owned(),
-                        cursor:    abs + end as u64,
+                        data:      String::from_utf8_lossy(data).into_owned(),
+                        cursor:    match_end,
                         timed_out: false,
                     });
                 }
+                scan_from = matcher.resume_from(start, ring.total());
             }
 
             let now = Instant::now();
@@ -491,7 +526,9 @@ pub fn spawn(
     shutdown: oneshot::Receiver<()>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        // One local agent at a time talks to this server. A single-threaded
+        // runtime is enough and avoids spawning a worker thread per core.
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(e) => {
                 let _ = ready.send(Err(format!("tokio runtime: {e}")));
@@ -535,6 +572,8 @@ async fn serve(
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc::unbounded_channel;
+
     use super::*;
 
     #[test]
@@ -579,5 +618,37 @@ mod tests {
         assert_eq!(ctrl_byte('C'), Some(3));
         assert_eq!(ctrl_byte('['), Some(0x1b));
         assert_eq!(ctrl_byte('1'), None);
+    }
+
+    #[test]
+    fn substr_scan_resumes_with_overlap_and_regex_rescans() {
+        let sub = Matcher::build("abc", false).unwrap();
+        assert_eq!(sub.resume_from(0, 100), 98);
+        assert_eq!(sub.resume_from(99, 100), 99); // never before the start cursor
+        let re = Matcher::build("a.*b", true).unwrap();
+        assert_eq!(re.resume_from(5, 100), 5);
+    }
+
+    // The inject receiver is dropped, these tests never send input.
+    fn shared() -> Arc<Shared> {
+        let tx = unbounded_channel().0;
+        Shared::new("COM1".to_string(), 115200, b"\r\n".to_vec(), tx)
+    }
+
+    #[test]
+    fn snapshot_returns_last_lines() {
+        let s = shared();
+        s.push_rx(b"one\r\ntwo\r\nthree\r\npartial");
+        assert_eq!(s.snapshot(2), "three\npartial");
+        assert_eq!(s.snapshot(10), "one\ntwo\nthree\npartial");
+        assert_eq!(s.snapshot(0), "");
+    }
+
+    #[test]
+    fn snapshot_ignores_trailing_newline() {
+        let s = shared();
+        s.push_rx(b"a\nb\n");
+        assert_eq!(s.snapshot(1), "b");
+        assert_eq!(s.snapshot(2), "a\nb");
     }
 }
