@@ -24,6 +24,8 @@ If you type a path that does not match any detected port, Enter accepts it as a
 raw device path. This is useful for virtual PTYs and adapters that do not
 enumerate.
 
+Run `smon --help` for the full flag list.
+
 ### Sending and receiving
 
 The bottom box is an input line. Type a command and press Enter to send it
@@ -36,6 +38,11 @@ pane in cyan with a `>` prefix.
 - Tab, or Right at the end of the line, accepts the ghost autocomplete suggestion.
 - Ctrl key combos such as Ctrl+C pass straight through to the device.
 - Ctrl+Q quits.
+
+If the device disappears mid-session, for example the board reboots or the
+adapter is replugged, smon keeps the scrollback, marks the session as
+disconnected in the title, and reconnects on its own as soon as the port is
+back.
 
 The line ending is chosen once at launch with `--eol` and defaults to `crlf`:
 

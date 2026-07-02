@@ -14,11 +14,12 @@ MCP server that uses these tools as a client.
 - Localhost only. Pass `--mcp <host:port>` to change the bind, for example
   `smon --mcp 127.0.0.1:5000`.
 
-If the address is already in use, smon prints a `mcp disabled: ...` notice and
-the serial monitor keeps running. The MCP server never takes the monitor down.
+If the address is already in use, smon writes a `mcp disabled: ...` note to the
+session log and the serial monitor keeps running. The MCP server never takes
+the monitor down.
 
-The bound endpoint is also shown in the top border of the TUI and as a
-`-- mcp serving ...` line in the scrollback and the log file.
+The bound endpoint is recorded in the session log file as `mcp serving ...`.
+The TUI itself does not show it.
 
 ## Connecting
 
@@ -61,8 +62,15 @@ literal substring. Without a `cursor` it waits for new output only. A single
 call waits at most 120 seconds; for longer waits the client calls again.
 
 `serial_read` with no `cursor` returns the whole retained buffer. The buffer
-keeps the most recent 512 KB, so a cursor pointing at bytes older than that
-simply starts at the oldest retained byte.
+keeps at least the most recent 512 KB, so a cursor pointing at bytes older than
+that simply starts at the oldest retained byte.
+
+### Disconnects
+
+If the device disappears mid-session, `serial_send` and `serial_send_ctrl`
+return an error and `serial_status` reports `connected: false`. smon retries
+the port every second and reconnects on its own, after which `connected` flips
+back to true. Cursors stay valid across a disconnect.
 
 ## Sharing with the TUI
 

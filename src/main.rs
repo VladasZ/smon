@@ -1,6 +1,6 @@
-use std::{net::SocketAddr, thread, time::Duration};
+use std::{env, net::SocketAddr, thread, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use serialport::{SerialPortType, available_ports};
 
@@ -14,11 +14,37 @@ mod wsl;
 
 const ATTACH_SENTINEL: &str = "\0usbipd-attach:";
 const DEFAULT_BAUD: u32 = 115200;
+// The MCP server always runs. --mcp only moves it off the default local bind.
 const DEFAULT_MCP: &str = "127.0.0.1:4123";
 
+const USAGE: &str = r"smon - minimalistic TUI serial monitor
+
+Usage: smon [options]
+
+Options:
+  --eol <cr|lf|crlf|none>  line ending appended to sent lines, default crlf
+  --mcp <host:port>        MCP server bind address, default 127.0.0.1:4123
+  -h, --help               show this help
+  -V, --version            show the version";
+
+enum Cli {
+    Run { eol: Vec<u8>, mcp: SocketAddr },
+    Help,
+    Version,
+}
+
 fn main() -> Result<()> {
-    let eol = parse_eol()?;
-    let mcp_bind = parse_mcp()?;
+    let (eol, mcp_bind) = match parse_cli(env::args().skip(1))? {
+        Cli::Help => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Cli::Version => {
+            println!("smon {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Run { eol, mcp } => (eol, mcp),
+    };
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &eol, mcp_bind);
     ratatui::restore();
@@ -40,40 +66,42 @@ fn run(terminal: &mut DefaultTerminal, eol: &[u8], mcp_bind: SocketAddr) -> Resu
     }
 }
 
-// The MCP server always runs; --mcp only moves it off the default local bind.
-fn parse_mcp() -> Result<SocketAddr> {
-    let mut args = std::env::args().skip(1);
-    let mut value: Option<String> = None;
+fn parse_cli(mut args: impl Iterator<Item = String>) -> Result<Cli> {
+    let mut eol: Option<String> = None;
+    let mut mcp: Option<String> = None;
     while let Some(arg) = args.next() {
-        if let Some(v) = arg.strip_prefix("--mcp=") {
-            value = Some(v.to_string());
-        } else if arg == "--mcp" {
-            value = args.next();
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Cli::Help),
+            "-V" | "--version" => return Ok(Cli::Version),
+            "--eol" => eol = Some(args.next().context("--eol needs a value")?),
+            "--mcp" => mcp = Some(args.next().context("--mcp needs a value")?),
+            other => {
+                if let Some(v) = other.strip_prefix("--eol=") {
+                    eol = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--mcp=") {
+                    mcp = Some(v.to_string());
+                } else {
+                    bail!("unknown argument '{other}', try --help");
+                }
+            }
         }
     }
 
-    let text = value.as_deref().unwrap_or(DEFAULT_MCP);
-    text.parse::<SocketAddr>()
-        .with_context(|| format!("invalid --mcp address '{text}', expected host:port like {DEFAULT_MCP}"))
+    let eol = eol_bytes(eol.as_deref().unwrap_or("crlf"))?;
+    let text = mcp.as_deref().unwrap_or(DEFAULT_MCP);
+    let mcp = text.parse::<SocketAddr>().with_context(|| {
+        format!("invalid --mcp address '{text}', expected host:port like {DEFAULT_MCP}")
+    })?;
+    Ok(Cli::Run { eol, mcp })
 }
 
-fn parse_eol() -> Result<Vec<u8>> {
-    let mut args = std::env::args().skip(1);
-    let mut value: Option<String> = None;
-    while let Some(arg) = args.next() {
-        if let Some(v) = arg.strip_prefix("--eol=") {
-            value = Some(v.to_string());
-        } else if arg == "--eol" {
-            value = args.next();
-        }
-    }
-
-    Ok(match value.as_deref().unwrap_or("crlf") {
+fn eol_bytes(name: &str) -> Result<Vec<u8>> {
+    Ok(match name {
         "cr" => b"\r".to_vec(),
         "lf" => b"\n".to_vec(),
         "crlf" => b"\r\n".to_vec(),
         "none" => Vec::new(),
-        other => anyhow::bail!("invalid --eol '{other}', expected one of: cr lf crlf none"),
+        other => bail!("invalid --eol '{other}', expected one of: cr lf crlf none"),
     })
 }
 
@@ -229,5 +257,42 @@ mod tests {
         let mut names = vec!["COM10", "COM9", "COM1"];
         names.sort_by_key(|a| port_sort_key(a));
         assert_eq!(names, ["COM1", "COM9", "COM10"]);
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli> {
+        parse_cli(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn unknown_or_incomplete_arguments_are_rejected() {
+        assert!(parse(&["--elo=cr"]).is_err());
+        assert!(parse(&["extra"]).is_err());
+        assert!(parse(&["--eol"]).is_err());
+        assert!(parse(&["--eol", "tab"]).is_err());
+        assert!(parse(&["--mcp", "not-an-addr"]).is_err());
+    }
+
+    #[test]
+    fn eol_and_mcp_parse_in_both_forms() {
+        let Ok(Cli::Run { eol, mcp }) = parse(&["--eol=cr", "--mcp", "127.0.0.1:9000"]) else {
+            panic!("expected Cli::Run");
+        };
+        assert_eq!(eol, b"\r");
+        assert_eq!(mcp.port(), 9000);
+    }
+
+    #[test]
+    fn defaults_apply_with_no_arguments() {
+        let Ok(Cli::Run { eol, mcp }) = parse(&[]) else {
+            panic!("expected Cli::Run");
+        };
+        assert_eq!(eol, b"\r\n");
+        assert_eq!(mcp.to_string(), DEFAULT_MCP);
+    }
+
+    #[test]
+    fn help_and_version_short_circuit() {
+        assert!(matches!(parse(&["--help"]), Ok(Cli::Help)));
+        assert!(matches!(parse(&["-V", "--bogus"]), Ok(Cli::Version)));
     }
 }
