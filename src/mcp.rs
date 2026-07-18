@@ -1,12 +1,12 @@
 //! The MCP side of smon: shared serial-console state plus a Streamable HTTP MCP
-//! server that exposes generic serial tools. It knows nothing about any board.
+//! server exposing the serial tools.
 //!
 //! The serial session feeds received bytes into a rolling buffer here, and MCP
 //! tools read that buffer and queue input back through an inject channel that
-//! the session forwards to its port writer. All board-specific behaviour belongs in a
-//! separate MCP server that uses these generic tools as a client.
+//! the session forwards to its port writer.
 
 use std::{
+    io::ErrorKind,
     net::SocketAddr,
     sync::{
         Arc, Mutex,
@@ -17,6 +17,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use axum::{
+    Json as HttpJson, Router,
+    extract::{Path as UrlPath, State},
+    http::StatusCode,
+    routing::post,
+};
 use memchr::memmem;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -28,8 +34,12 @@ use rmcp::{
     },
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc::UnboundedSender, oneshot};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, mpsc::UnboundedSender, oneshot},
+};
 
 // Rolling buffer cap. At 115200 baud the console fills slowly, so a few hundred
 // KB keeps enough scrollback that expect() can still find a line that scrolled
@@ -179,8 +189,7 @@ impl Shared {
         })
     }
 
-    /// Append received bytes and wake any waiting `expect` calls. Called from
-    /// the serial reader thread.
+    /// Called from the serial reader thread.
     pub fn push_rx(&self, bytes: &[u8]) {
         self.ring.lock().unwrap().append(bytes);
         self.notify.notify_waiters();
@@ -194,7 +203,7 @@ impl Shared {
         self.ring.lock().unwrap().total()
     }
 
-    /// Bytes received since `cursor` (or the whole retained buffer if `None`),
+    /// Bytes received since `cursor`, or the whole retained buffer if `None`,
     /// with the new cursor to pass next time.
     pub fn read(&self, cursor: Option<u64>) -> (String, u64) {
         let ring = self.ring.lock().unwrap();
@@ -206,7 +215,6 @@ impl Shared {
         )
     }
 
-    /// The last `lines` complete lines currently in the buffer.
     pub fn snapshot(&self, lines: usize) -> String {
         let ring = self.ring.lock().unwrap();
         if lines == 0 {
@@ -259,7 +267,7 @@ impl Shared {
         Ok(cursor)
     }
 
-    /// Send a single Ctrl+<char> control byte. Returns the cursor before the write.
+    /// Returns the cursor before the write.
     pub async fn send_ctrl(&self, ctrl: char) -> Result<u64, String> {
         let byte = ctrl_byte(ctrl).ok_or_else(|| format!("no control byte for '{ctrl}'"))?;
         let cursor = self.total();
@@ -284,7 +292,7 @@ impl Shared {
     }
 
     /// Wait until `pattern` appears in received data, or `timeout_ms` elapses.
-    /// Scans from `cursor` if given, else from the current end (new data only).
+    /// Scans from `cursor` if given, else from the current end for new data only.
     /// Returns the text from the start point up to and including the match, or
     /// up to the end on timeout, plus the cursor to continue from.
     pub async fn expect(
@@ -400,7 +408,7 @@ struct SnapshotReq {
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct Cursor {
-    /// Cursor just before the write; read or expect from here to capture the reply.
+    /// Cursor just before the write. Read or expect from here to capture the reply.
     cursor: u64,
 }
 
@@ -432,8 +440,7 @@ struct StatusResult {
     cursor:    u64,
 }
 
-/// The MCP server, exposing generic serial tools over the shared console state.
-/// Cloned per session by the transport; every clone shares the same `Shared`.
+/// Cloned per session by the transport. Every clone shares the same `Shared`.
 #[derive(Clone)]
 struct Server {
     state: Arc<Shared>,
@@ -516,9 +523,9 @@ impl Server {
 impl ServerHandler for Server {}
 
 /// Start the MCP server on its own thread with its own tokio runtime. The bind
-/// result is reported once through `ready`, so a bind failure is a warning
-/// rather than fatal. The server stops when `shutdown` fires or the process
-/// exits.
+/// result is reported once through `ready`, and on a bind failure the session
+/// ends the whole program, an unreachable smon is worse than no smon. The
+/// server stops when `shutdown` fires or the process exits.
 pub fn spawn(
     bind: SocketAddr,
     state: Arc<Shared>,
@@ -539,28 +546,139 @@ pub fn spawn(
     })
 }
 
+// How many consecutive ports to try from the requested one. Each running smon
+// instance takes one, so this is the number of instances that can serve MCP at
+// the same time.
+pub(crate) const PORT_HUNT_RANGE: u16 = 16;
+
+type CallError = (StatusCode, String);
+
+fn bad_request(e: String) -> CallError {
+    (StatusCode::BAD_REQUEST, e)
+}
+
+fn internal(e: String) -> CallError {
+    (StatusCode::INTERNAL_SERVER_ERROR, e)
+}
+
+fn parse_args<T: DeserializeOwned>(args: &str) -> Result<T, CallError> {
+    serde_json::from_str(args).map_err(|e| bad_request(e.to_string()))
+}
+
+fn respond<T: Serialize>(value: T) -> Result<HttpJson<Value>, CallError> {
+    serde_json::to_value(value)
+        .map(HttpJson)
+        .map_err(|e| internal(e.to_string()))
+}
+
+/// One-shot HTTP side door next to /mcp: POST /call/<tool> with the JSON
+/// arguments as the body, an empty body means no arguments. Same tools as MCP
+/// without the session handshake, so `smon call` and curl stay one-liners.
+async fn call_http(
+    UrlPath(tool): UrlPath<String>,
+    State(state): State<Arc<Shared>>,
+    body: String,
+) -> Result<HttpJson<Value>, CallError> {
+    let args = if body.trim().is_empty() { "{}" } else { body.as_str() };
+    match tool.as_str() {
+        "serial_send" => {
+            let req: SendReq = parse_args(args)?;
+            let cursor = state.send(req.text, req.newline).await.map_err(internal)?;
+            respond(Cursor { cursor })
+        }
+        "serial_send_ctrl" => {
+            let req: SendCtrlReq = parse_args(args)?;
+            let ch = req
+                .ctrl
+                .chars()
+                .next()
+                .ok_or_else(|| bad_request("ctrl must be one character".to_string()))?;
+            let cursor = state.send_ctrl(ch).await.map_err(internal)?;
+            respond(Cursor { cursor })
+        }
+        "serial_read" => {
+            let req: ReadReq = parse_args(args)?;
+            let (data, cursor) = state.read(req.cursor);
+            respond(ReadResult { data, cursor })
+        }
+        "serial_expect" => {
+            let req: ExpectReq = parse_args(args)?;
+            let out = state
+                .expect(&req.pattern, req.timeout_ms, req.regex, req.cursor)
+                .await
+                .map_err(bad_request)?;
+            respond(ExpectResult {
+                matched:   out.matched,
+                data:      out.data,
+                cursor:    out.cursor,
+                timed_out: out.timed_out,
+            })
+        }
+        "serial_snapshot" => {
+            let req: SnapshotReq = parse_args(args)?;
+            respond(state.snapshot(req.lines))
+        }
+        "serial_status" => {
+            let (port, baud, connected, cursor) = state.status();
+            respond(StatusResult {
+                port,
+                baud,
+                connected,
+                cursor,
+            })
+        }
+        other => Err((StatusCode::NOT_FOUND, format!("unknown tool '{other}'"))),
+    }
+}
+
+/// Bind the requested address. When the port is taken by another smon
+/// instance, hunt upward through the next ports so every instance gets its own
+/// endpoint. The caller learns the real port from the listener.
+async fn bind_hunting(bind: SocketAddr) -> Result<TcpListener, String> {
+    for offset in 0..PORT_HUNT_RANGE {
+        let Some(port) = bind.port().checked_add(offset) else {
+            break;
+        };
+        let addr = SocketAddr::new(bind.ip(), port);
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == ErrorKind::AddrInUse => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(format!(
+        "ports {}..{} all in use",
+        bind.port(),
+        bind.port().saturating_add(PORT_HUNT_RANGE - 1)
+    ))
+}
+
 async fn serve(
     bind: SocketAddr,
     state: Arc<Shared>,
     ready: ReadySender<Result<SocketAddr, String>>,
     shutdown: oneshot::Receiver<()>,
 ) {
-    let listener = match tokio::net::TcpListener::bind(bind).await {
+    let listener = match bind_hunting(bind).await {
         Ok(listener) => listener,
         Err(e) => {
-            let _ = ready.send(Err(e.to_string()));
+            let _ = ready.send(Err(e));
             return;
         }
     };
     let addr = listener.local_addr().unwrap_or(bind);
     let _ = ready.send(Ok(addr));
 
+    let http_state = Arc::clone(&state);
     let service = StreamableHttpService::new(
         move || Ok(Server { state: Arc::clone(&state) }),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
-    let app = axum::Router::new().route_service("/mcp", service);
+    let app = Router::new()
+        .route_service("/mcp", service)
+        .route("/call/{tool}", post(call_http))
+        .with_state(http_state);
 
     let graceful = async move {
         let _ = shutdown.await;
@@ -572,9 +690,23 @@ async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::{runtime::Builder, sync::mpsc::unbounded_channel};
 
     use super::*;
+
+    // Two smon instances must not fight over one MCP port, the second hunts on.
+    #[test]
+    fn bind_hunting_skips_taken_port() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let taken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let requested = taken.local_addr().unwrap();
+            let hunted = bind_hunting(requested).await.unwrap();
+            let port = hunted.local_addr().unwrap().port();
+            assert!(port > requested.port());
+            assert!(port < requested.port() + PORT_HUNT_RANGE);
+        });
+    }
 
     #[test]
     fn ring_drops_oldest_and_tracks_offset() {
@@ -598,18 +730,18 @@ mod tests {
 
     #[test]
     fn substr_match_returns_offset_past_match() {
-        let m = Matcher::build("-> ", false).unwrap();
-        // "-> " sits at bytes 11..14, so the offset just past it is 14.
-        assert_eq!(m.find_end(b"value = 1\r\n-> "), Some(14));
+        let m = Matcher::build("ready> ", false).unwrap();
+        // "ready> " sits at bytes 11..18, so the offset just past it is 18.
+        assert_eq!(m.find_end(b"value = 1\r\nready> "), Some(18));
         assert_eq!(m.find_end(b"still running"), None);
     }
 
     #[test]
-    fn regex_match_finds_process_tag() {
-        let m = Matcher::build(r"\(P\d\)", true).unwrap();
-        // "(P1)" sits at bytes 13..17, so the offset just past it is 17.
-        assert_eq!(m.find_end(b"No Heartbeat (P1) 61 sec"), Some(17));
-        assert_eq!(m.find_end(b"No Heartbeat yet"), None);
+    fn regex_match_finds_tagged_line() {
+        let m = Matcher::build(r"\(T\d\)", true).unwrap();
+        // "(T2)" sits at bytes 8..12, so the offset just past it is 12.
+        assert_eq!(m.find_end(b"timeout (T2) 61 sec"), Some(12));
+        assert_eq!(m.find_end(b"timeout pending"), None);
     }
 
     #[test]

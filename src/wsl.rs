@@ -221,7 +221,7 @@ GUID                                  DEVICE
             .filter(|d| d.state != State::Attached && is_serial(&d.description))
             .map(|d| d.busid)
             .collect();
-        // 4-4 dropped (attached), 5-5/6-6 dropped (not serial / attached)
+        // 4-4 and 6-6 are attached, 5-5 is not serial, so all three drop out
         assert_eq!(busids, ["1-1", "2-2", "3-3"]);
     }
 

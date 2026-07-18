@@ -40,8 +40,8 @@ impl SessionLog {
         self.entry("TX", &format!("<{label}>"))
     }
 
-    // Input injected by an MCP client, marked so the log distinguishes it from
-    // what a person typed while still recording it as sent to the board.
+    // Marked so the log tells injected input apart from what a person typed, while
+    // still recording it as sent to the device.
     pub fn tx_agent(&mut self, bytes: &[u8]) -> Result<()> {
         let text = String::from_utf8_lossy(bytes);
         self.entry("TX", &format!("[mcp] {}", escape(&text)))

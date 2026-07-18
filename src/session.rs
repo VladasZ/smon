@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nucleo_matcher::{Config as FuzzyConfig, Matcher, Utf32String};
 use ratatui::{
@@ -34,8 +34,8 @@ use crate::{
 
 const MAX_LINES: usize = 5000;
 const RECONNECT_EVERY: Duration = Duration::from_secs(1);
-// A board asserting flow control can stall writes briefly, which is normal. Only
-// a stall this long with no progress at all is treated as a dead port.
+// A device asserting flow control stalls writes briefly, which is normal. Only a
+// stall this long with no progress at all means a dead port.
 const WRITE_STALL_LIMIT: Duration = Duration::from_secs(5);
 
 enum Origin {
@@ -58,7 +58,6 @@ struct Ui {
     cursor: usize,
     history: Vec<String>,
     hist_pos: Option<usize>,
-    // best fuzzy match from history for the current input, shown as ghost text.
     suggestion: Option<String>,
 }
 
@@ -67,8 +66,8 @@ impl Ui {
         for ch in String::from_utf8_lossy(bytes).chars() {
             match ch {
                 '\n' => self.end_line(),
-                // carriage returns and other control bytes would corrupt the on-screen lines;
-                // the faithful escaped form is kept in the log file, not here.
+                // Control bytes would corrupt the on-screen lines. The log file keeps
+                // the escaped form.
                 '\r' => {}
                 c if c.is_control() && c != '\t' => {}
                 c => self.rx_partial.push(c),
@@ -88,8 +87,8 @@ impl Ui {
         self.push_out(Origin::Tx, text);
     }
 
-    // Injected input joins the same scrollback, so the person at the TUI sees
-    // exactly what an MCP client did, in order with everything else.
+    // Injected input joins the same scrollback, so the person at the TUI sees what
+    // an MCP client did, in order with everything else.
     fn echo_agent(&mut self, text: &str) {
         self.push_out(Origin::Agent, text);
     }
@@ -163,7 +162,6 @@ impl Ui {
         }
     }
 
-    // The freshest history entry that fuzzy-matches the input and isn't already exactly it.
     fn update_suggestion(&mut self) {
         let input: String = self.input.iter().collect();
         if input.is_empty() {
@@ -220,15 +218,13 @@ enum PortEvent {
     Dead(String),
 }
 
-/// A write queued for the writer thread. `resp` reports the result back to an
-/// MCP client. Keyboard writes have no listener.
+/// `resp` reports the result to an MCP client. Keyboard writes have no listener.
 struct WriteReq {
     bytes: Vec<u8>,
     resp:  Option<oneshot::Sender<Result<(), String>>>,
 }
 
-/// One open port and its reader and writer threads. Dropped and rebuilt on
-/// every disconnect.
+/// Dropped and rebuilt on every disconnect.
 struct Connection {
     writer_tx: Sender<WriteReq>,
     stop_tx:   Sender<()>,
@@ -285,8 +281,8 @@ fn teardown(conn: Connection) {
     let _ = conn.writer.join();
 }
 
-// Queue keyboard bytes for the writer thread. While the port is disconnected
-// the input is dropped with a note instead of piling up for a dead port.
+// While disconnected the input is dropped with a note instead of piling up for a
+// dead port.
 fn queue_write(
     conn: &Option<Connection>,
     ui: &mut Ui,
@@ -364,13 +360,21 @@ pub fn run(
         }
 
         // Log the MCP bind result once it arrives. The MCP endpoint is for agents,
-        // so it goes to the session log only and is never shown in the TUI.
+        // so it goes to the session log only and is never shown in the TUI. An
+        // agent must always be able to reach a running smon, so a failed bind
+        // ends the session instead of degrading to a monitor without MCP.
         if let Ok(result) = ready_rx.try_recv() {
-            let note = match result {
-                Ok(addr) => format!("mcp serving http://{addr}/mcp"),
-                Err(e) => format!("mcp disabled: {e}"),
-            };
-            log.system(&note)?;
+            match result {
+                Ok(addr) => log.system(&format!("mcp serving http://{addr}/mcp"))?,
+                Err(e) => {
+                    // The server thread is already done, it ends when the bind fails.
+                    log.system(&format!("mcp bind failed: {e}"))?;
+                    if let Some(c) = conn.take() {
+                        teardown(c);
+                    }
+                    return Err(anyhow!("mcp bind failed: {e}"));
+                }
+            }
         }
 
         // Forward input queued by MCP clients, echoing and logging it like a
@@ -464,7 +468,6 @@ pub fn run(
             KeyCode::Backspace => ui.backspace(),
             KeyCode::Delete => ui.delete(),
             KeyCode::Left => ui.cursor = ui.cursor.saturating_sub(1),
-            // at the end of the line, Right accepts the ghost suggestion; otherwise it moves.
             KeyCode::Right if ui.cursor == ui.input.len() && ui.suggestion.is_some() => {
                 ui.accept_suggestion()
             }
@@ -549,13 +552,11 @@ where
         let scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
         frame.render_widget(paragraph.scroll((scroll, 0)), out_inner);
 
-        // Only show the scrollbar when content actually overflows. Lines left out of the tail
-        // wrap to at least one row each, which bounds the total row count from below without
-        // wrapping them. The thumb stays pinned to the bottom, only its size is approximate.
-        // content_length is the number of scroll positions, NOT the total row count: the thumb
+        // Lines left out of the tail wrap to at least one row each, which bounds the total row
+        // count from below without wrapping them, so the thumb size is approximate.
+        // content_length is the number of scroll positions, not the total row count. The thumb
         // reaches the bottom only when position == content_length, and the bottom-pinned view
-        // is always at that maximum. viewport_content_length sizes the thumb to the visible
-        // fraction.
+        // is always at that maximum.
         let total = ui.lines.len() + usize::from(!ui.rx_partial.is_empty());
         let total_rows = rows + (total - shown);
         if total_rows > height {
@@ -650,7 +651,7 @@ fn reader_loop(
             Ok(0) => {}
             Ok(n) => {
                 // Feed the MCP buffer straight from the reader so expect() sees bytes without
-                // waiting on the ~16ms UI tick.
+                // waiting on the 16ms UI tick.
                 state.push_rx(&buf[..n]);
                 if events.send(PortEvent::Rx(buf[..n].to_vec())).is_err() {
                     return;
@@ -797,36 +798,36 @@ mod tests {
         assert_eq!(ui.suggestion, None);
     }
 
-    // Two real captured device lines. The word-wrapper drops the whitespace that lands on a
-    // wrap boundary, so it packs each into fewer rows than a naive ceil(chars / width) count:
-    // the first over-counts on a narrow terminal, the second on a wide one. Feeding many of
-    // these used to make the naive row total overshoot the real wrapped height, so the scroll
-    // ran past the bottom and stranded the newest lines at the top of the pane. Keep the
-    // trailing spaces, they are what tips ceil() over while the wrapper still fits the line.
-    const NARROW_OVERCOUNT: &str = "D I A1 0x00F 0x00000 26-07-01~05:40:42.222+00:00~#  TSK1 APP ServiceManager MessageCollectorRegistryComponent.cpp Line 77 : MessageCollectorRegistryComponent::initializeAfterAllRegistryComponents() called, initializing messageCollector~ ";
-    const WIDE_OVERCOUNT: &str = "D I A1 0x00F 0x00000 26-07-01~05:40:45.039+00:00~#  TSK1 APP ServiceManager RemoteLoggingRegistryComponent.cpp Line 180 : RemoteLoggingRegistryComponent::initializeAfterAllRegistryComponents() called, initializing StreamHandler~ ";
+    // Two words of exactly the pane width, plus the space between them and a trailing one.
+    // The wrapper fits each word on its own row and drops the space at the break, so the line
+    // takes 2 rows while ceil(chars / width) counts the spaces and asks for 3. Feeding many
+    // of these used to make the naive row total overshoot the real wrapped height, so the
+    // scroll ran past the bottom and stranded the newest lines at the top of the pane.
+    fn overcounting_line(inner: u16) -> String {
+        format!("{} {} ", "a".repeat(inner as usize), "b".repeat(inner as usize))
+    }
 
     #[test]
     fn narrow_terminal_pins_log_to_bottom_when_overflowing() {
-        assert_bottom_filled(NARROW_OVERCOUNT, 237, 120, 24);
+        assert_bottom_filled(120, 24);
     }
 
     #[test]
     fn wide_terminal_pins_log_to_bottom_when_overflowing() {
-        assert_bottom_filled(WIDE_OVERCOUNT, 229, 230, 20);
+        assert_bottom_filled(230, 20);
     }
 
     // Fill the pane with copies of an over-counting line and check the last text row is not
     // blank. The precondition asserts the line really does over-count at this width, so the
-    // test can never silently pass on data that stopped triggering the bug (a lost trailing
-    // space, or a change in ratatui's wrapping).
-    fn assert_bottom_filled(line: &str, expected_len: usize, width: u16, height: u16) {
+    // test can never silently pass on data that stopped triggering the bug, for example after
+    // a change in ratatui's wrapping.
+    fn assert_bottom_filled(width: u16, height: u16) {
         use ratatui::{Terminal, backend::TestBackend};
 
-        assert_eq!(line.chars().count(), expected_len, "test line length changed");
         let inner = width - 2;
+        let line = overcounting_line(inner);
         let naive = line.chars().count().div_ceil(inner as usize);
-        let wrapped = Paragraph::new(line).wrap(Wrap { trim: false }).line_count(inner);
+        let wrapped = Paragraph::new(line.as_str()).wrap(Wrap { trim: false }).line_count(inner);
         assert!(
             naive > wrapped,
             "line must over-count at width {width}: naive={naive} wrapped={wrapped}"
@@ -842,8 +843,8 @@ mod tests {
         draw(&mut terminal, &ui, "COM11", 115200, true).unwrap();
         let buf = terminal.backend().buffer();
 
-        // The 3-row input box sits at the bottom, with the output box's own bottom border just
-        // above it, so the last text row is height - 3 - 1 - 1 (0-indexed).
+        // The 3-row input box sits at the bottom, with the output box's bottom border just
+        // above it, so the last 0-indexed text row is height - 3 - 1 - 1.
         let last_text_row = height - 3 - 1 - 1;
         let row: String = (1..width - 1)
             .map(|x| buf.cell((x, last_text_row)).unwrap().symbol())

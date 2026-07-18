@@ -2,9 +2,7 @@
 
 smon serves a small [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint so an agent, or any MCP client, can drive the serial console the same
-way a person can at the TUI. It exposes generic serial tools only. It has no
-knowledge of any board or firmware. Board-specific helpers belong in a separate
-MCP server that uses these tools as a client.
+way a person can at the TUI.
 
 ## Endpoint
 
@@ -14,12 +12,38 @@ MCP server that uses these tools as a client.
 - Localhost only. Pass `--mcp <host:port>` to change the bind, for example
   `smon --mcp 127.0.0.1:5000`.
 
-If the address is already in use, smon writes a `mcp disabled: ...` note to the
-session log and the serial monitor keeps running. The MCP server never takes
-the monitor down.
+When the requested port is taken, by another smon instance for example, smon
+hunts upward through the next ports, 16 in total, and serves on the first free
+one. Every running instance therefore has its own endpoint. A client finds the
+instance for a given serial port by probing the ports in order and checking
+`serial_status`, which reports the COM port each instance monitors. When the
+whole range is taken smon exits with `mcp bind failed`, a running smon without
+a reachable MCP endpoint is not allowed.
 
 The bound endpoint is recorded in the session log file as `mcp serving ...`.
 The TUI itself does not show it.
+
+## One-shot calls from a shell
+
+The smon binary is its own client. `smon list` probes the port range and
+prints every running instance, MCP port, serial port, baud, connection state.
+`smon call <port> <tool> [json-args]` calls one tool and prints the JSON
+result, string results print raw.
+
+```
+smon list
+smon call 4123 serial_status
+smon call 4124 serial_send '{"text":"reboot","newline":true}'
+smon call 4124 serial_expect '{"pattern":"ready> ","timeout_ms":10000,"cursor":0}'
+```
+
+Under the hood this uses a plain HTTP side door next to /mcp on the same bind:
+`POST /call/<tool>` with the JSON arguments as the body, no MCP session
+needed, so curl works too: `curl -d '{}' http://127.0.0.1:4123/call/serial_status`.
+
+Note for agents: do not write temp wrapper scripts around the endpoint, use
+`smon call`. If something is still too clunky, propose an smon improvement so
+the friction gets fixed in the tool once rather than re-scripted every session.
 
 ## Connecting
 
@@ -34,9 +58,8 @@ the URL.
 
 ## Tools
 
-All tools are generic. Every read returns a `cursor`, an absolute byte offset
-into the received stream. Pass it back to read or wait for only what arrived
-since.
+Every read returns a `cursor`, an absolute byte offset into the received stream.
+Pass it back to read or wait for only what arrived since.
 
 | Tool | Parameters | Returns |
 | --- | --- | --- |
@@ -53,13 +76,13 @@ since.
 is send then expect:
 
 1. `serial_send { text: "version" }` -> returns `cursor`.
-2. `serial_expect { pattern: "-> ", timeout_ms: 5000, cursor }` -> returns the
-   output the board printed in reply, up to the next shell prompt.
+2. `serial_expect { pattern: "ready> ", timeout_ms: 5000, cursor }` -> returns the
+   output the device printed in reply, up to the next shell prompt.
 
-`serial_expect` matches on the raw byte stream, so it finds prompts like `-> `
+`serial_expect` matches on the raw byte stream, so it finds prompts like `ready> `
 that have no trailing newline. Set `regex: true` to match a pattern instead of a
 literal substring. Without a `cursor` it waits for new output only. A single
-call waits at most 120 seconds; for longer waits the client calls again.
+call waits at most 120 seconds. For longer waits the client calls again.
 
 `serial_read` with no `cursor` returns the whole retained buffer. The buffer
 keeps at least the most recent 512 KB, so a cursor pointing at bytes older than
@@ -77,4 +100,4 @@ back to true. Cursors stay valid across a disconnect.
 The person at the TUI and MCP clients share one console. Input an MCP client
 sends is written to the port from the same place as keystrokes, echoed in the
 scrollback as a magenta `>>` line, and recorded in the log as `[mcp]`. Several
-clients can connect at once; each keeps its own read cursor.
+clients can connect at once, each keeping its own read cursor.

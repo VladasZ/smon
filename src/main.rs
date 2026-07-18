@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use serialport::{SerialPortType, available_ports};
 
+mod client;
 mod config;
 mod log;
 mod mcp;
@@ -17,18 +18,31 @@ const DEFAULT_BAUD: u32 = 115200;
 // The MCP server always runs. --mcp only moves it off the default local bind.
 const DEFAULT_MCP: &str = "127.0.0.1:4123";
 
-const USAGE: &str = r"smon - minimalistic TUI serial monitor
+const USAGE: &str = r#"smon - minimalistic TUI serial monitor
 
 Usage: smon [options]
+       smon call <port> <tool> [json-args]
+       smon list
+
+Subcommands:
+  call <port> <tool> [json]  call one tool on a running instance, for example
+                             smon call 4123 serial_status
+                             smon call 4124 serial_send '{"text":"reboot"}'
+  list                       list running instances: MCP port, serial port,
+                             baud, connection state
 
 Options:
   --eol <cr|lf|crlf|none>  line ending appended to sent lines, default crlf
-  --mcp <host:port>        MCP server bind address, default 127.0.0.1:4123
+  --mcp <host:port>        MCP server bind address, default 127.0.0.1:4123.
+                           When the port is taken by another smon instance the
+                           next ports are tried, so every instance serves MCP.
   -h, --help               show this help
-  -V, --version            show the version";
+  -V, --version            show the version"#;
 
 enum Cli {
     Run { eol: Vec<u8>, mcp: SocketAddr },
+    Call { port: u16, tool: String, args: String },
+    List,
     Help,
     Version,
 }
@@ -43,6 +57,11 @@ fn main() -> Result<()> {
             println!("smon {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        Cli::Call { port, tool, args } => {
+            print_call_result(&client::call(port, &tool, &args)?);
+            return Ok(());
+        }
+        Cli::List => return client::list(),
         Cli::Run { eol, mcp } => (eol, mcp),
     };
     let mut terminal = ratatui::init();
@@ -66,7 +85,45 @@ fn run(terminal: &mut DefaultTerminal, eol: &[u8], mcp_bind: SocketAddr) -> Resu
     }
 }
 
-fn parse_cli(mut args: impl Iterator<Item = String>) -> Result<Cli> {
+// A tool result is JSON. Print bare strings raw, snapshot text mostly, and
+// everything else pretty, so agents and humans both read it directly.
+fn print_call_result(body: &str) {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::String(text)) => println!("{text}"),
+        Ok(value) => println!("{:#}", value),
+        Err(_) => println!("{body}"),
+    }
+}
+
+fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
+    let mut args = args.peekable();
+    match args.peek().map(String::as_str) {
+        Some("call") => {
+            args.next();
+            let port = args.next().context("usage: smon call <port> <tool> [json-args]")?;
+            let port = port
+                .parse::<u16>()
+                .with_context(|| format!("invalid port '{port}'"))?;
+            let tool = args.next().context("call needs a tool name, e.g. serial_status")?;
+            let json = args.next().unwrap_or_else(|| "{}".to_string());
+            if args.next().is_some() {
+                bail!("too many arguments for call");
+            }
+            return Ok(Cli::Call { port, tool, args: json });
+        }
+        Some("list") => {
+            args.next();
+            if args.next().is_some() {
+                bail!("list takes no arguments");
+            }
+            return Ok(Cli::List);
+        }
+        _ => {}
+    }
+    parse_flags(args)
+}
+
+fn parse_flags(mut args: impl Iterator<Item = String>) -> Result<Cli> {
     let mut eol: Option<String> = None;
     let mut mcp: Option<String> = None;
     while let Some(arg) = args.next() {
@@ -294,5 +351,19 @@ mod tests {
     fn help_and_version_short_circuit() {
         assert!(matches!(parse(&["--help"]), Ok(Cli::Help)));
         assert!(matches!(parse(&["-V", "--bogus"]), Ok(Cli::Version)));
+    }
+
+    #[test]
+    fn call_and_list_subcommands_parse() {
+        let Ok(Cli::Call { port, tool, args }) = parse(&["call", "4124", "serial_status"]) else {
+            panic!("expected Cli::Call");
+        };
+        assert_eq!(port, 4124);
+        assert_eq!(tool, "serial_status");
+        assert_eq!(args, "{}");
+        assert!(matches!(parse(&["list"]), Ok(Cli::List)));
+        assert!(parse(&["call", "notaport", "serial_status"]).is_err());
+        assert!(parse(&["call", "4124"]).is_err());
+        assert!(parse(&["list", "extra"]).is_err());
     }
 }

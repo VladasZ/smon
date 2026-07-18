@@ -3,12 +3,12 @@
 WSL2 is a real VM and does not bridge Windows COM ports. The `/dev/ttyS0..N`
 nodes inside WSL are placeholders, not your Windows COM ports - opening them
 will not reach a device. To use a serial device, forward its USB adapter into
-WSL2 with usbipd-win; it then appears as `/dev/ttyUSB*` (USB-UART) or
-`/dev/ttyACM*` (USB CDC).
+WSL2 with usbipd-win. It then appears as `/dev/ttyUSB*` for a USB-UART bridge or
+`/dev/ttyACM*` for USB CDC.
 
 ## Requirements
 
-- Windows 11 (build 22000+) or Windows 10 via the Microsoft Store WSL.
+- Windows 11 build 22000 or newer, or Windows 10 via the Microsoft Store WSL.
 - WSL kernel >= 5.10.60.1 (`uname -r`). Update with `wsl --update`.
 - usbipd-win 5.x on Windows: `winget install --interactive --exact dorssel.usbipd-win`
 - Build dep for smon's port enumeration: `sudo apt install -y pkg-config libudev-dev`
@@ -18,13 +18,13 @@ ship built into recent WSL kernels - no custom kernel needed for typical adapter
 
 ## Commands
 
-All `usbipd` commands run in a **Windows** PowerShell window (it is a Windows
-program). Only `bind` needs Administrator.
+`usbipd` is a Windows program, so all its commands run in a **Windows** PowerShell
+window. Only `bind` needs Administrator.
 
 | command | where | admin |
 | --- | --- | --- |
 | `usbipd list` | Windows PowerShell | no |
-| `usbipd bind --busid <id>` | Windows PowerShell | yes (one-time) |
+| `usbipd bind --busid <id>` | Windows PowerShell | yes, one time |
 | `usbipd attach --wsl --busid <id>` | Windows PowerShell | no |
 | `usbipd detach --busid <id>` | Windows PowerShell | no |
 
@@ -39,8 +39,8 @@ usbipd attach --wsl --busid 1-1   # forward into WSL2
 In WSL:
 
 ```bash
-lsusb                             # device appears (sudo apt install usbutils)
-ls -l /dev/ttyUSB* /dev/ttyACM*   # the new node(s)
+lsusb                             # device appears, needs sudo apt install usbutils
+ls -l /dev/ttyUSB* /dev/ttyACM*   # the new nodes
 dmesg | tail                      # which driver bound, which node
 ```
 
@@ -49,15 +49,14 @@ dmesg | tail                      # which driver bound, which node
 - `bind` is persistent: run once, survives reboots and replugs.
 - `attach` is NOT persistent: re-run after a Windows reboot, a `wsl --shutdown`,
   or unplugging/replugging the device. No admin needed.
-- Auto re-attach on replug (holds a terminal open):
+- Auto re-attach on replug, which holds a terminal open:
   `usbipd attach --wsl --auto-attach --busid 1-1`
 
 ## Multi-port devices
 
 usbipd forwards a whole USB device by BUSID, not per port. A single adapter that
-exposes several UARTs (e.g. FTDI FT2232/FT4232, CP2105, dual-CDC boards) has one
-BUSID; one `attach` brings in all of them as separate nodes
-(`/dev/ttyUSB0` + `/dev/ttyUSB1`, etc.).
+exposes several UARTs has one BUSID, so one `attach` brings in every port as its
+own node, `/dev/ttyUSB0` and `/dev/ttyUSB1` and so on.
 
 ## Permissions
 
@@ -75,7 +74,7 @@ attachable serial devices to the port picker:
 
 - A bound-but-detached device shows as `attach <busid> <name> [usbipd]`.
   Selecting it runs `usbipd attach --wsl`, waits for the new `/dev/ttyUSB*`
-  node(s), then returns to the picker so you choose the actual port.
+  nodes, then returns to the picker so you choose the actual port.
 - An unbound device is labeled `[usbipd: needs one-time admin bind]`; selecting
   it surfaces the exact `usbipd bind --busid <id>` command to run as admin.
 
@@ -84,9 +83,10 @@ This automates everything except the one-time admin `bind`.
 ## COM port note
 
 While a device is attached to WSL it is removed from the Windows USB stack, so
-Windows shows no COM port for it (`[System.IO.Ports.SerialPort]::GetPortNames()`
-returns empty). The Windows `COMx` identity exists only while the device is on
-the Windows side; inside WSL it is `/dev/ttyUSB*`.
+Windows shows no COM port for it, and
+`[System.IO.Ports.SerialPort]::GetPortNames()` returns empty. The Windows `COMx`
+identity exists only while the device is on the Windows side. Inside WSL it is
+`/dev/ttyUSB*`.
 
 ## Quitting smon
 

@@ -39,8 +39,8 @@ pane in cyan with a `>` prefix.
 - Ctrl key combos such as Ctrl+C pass straight through to the device.
 - Ctrl+Q quits.
 
-If the device disappears mid-session, for example the board reboots or the
-adapter is replugged, smon keeps the scrollback, marks the session as
+If the device disappears mid-session, for example it reboots or the adapter is
+replugged, smon keeps the scrollback, marks the session as
 disconnected in the title, and reconnects on its own as soon as the port is
 back.
 
@@ -97,14 +97,30 @@ The baud per port and the command history live in `config.json`, found in:
 
 smon also serves a small [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint, so an agent or any MCP client can drive the serial console the same way
-you can at the TUI. It exposes generic serial tools only, such as `serial_send`,
-`serial_read`, and `serial_expect`, with no knowledge of any device.
+you can at the TUI. It exposes tools such as `serial_send`, `serial_read`, and
+`serial_expect`.
 
 It is always on and listens on `http://127.0.0.1:4123/mcp` over Streamable HTTP,
 localhost only. Change the bind with `--mcp`:
 
 ```
 smon --mcp 127.0.0.1:5000
+```
+
+If that port is already taken, by another smon for example, smon walks up to the
+next free one, so every running instance serves its own endpoint.
+
+### Driving it from a shell
+
+The smon binary is its own client, so no curl and no MCP session are needed.
+`smon list` prints every running instance with its MCP port, serial port, baud
+and connection state. `smon call <port> <tool> [json]` calls one tool and prints
+the result.
+
+```
+smon list
+smon call 4123 serial_status
+smon call 4124 serial_send '{"text":"version","newline":true}'
 ```
 
 See [docs/mcp.md](docs/mcp.md) for the tool list and how to connect a client.
