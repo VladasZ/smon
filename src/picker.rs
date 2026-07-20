@@ -5,7 +5,10 @@ use std::{
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use nucleo_matcher::{Config, Matcher, Utf32String};
+use nucleo_matcher::{
+    Config, Matcher, Utf32String,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 use ratatui::{
     DefaultTerminal,
     layout::{Constraint, Direction, Layout, Position},
@@ -36,15 +39,17 @@ fn filter_items(labels: &[Utf32String], query: &str, matcher: &mut Matcher) -> V
     if query.is_empty() {
         return (0..labels.len()).collect();
     }
-    let needle = Utf32String::from(query);
-    let mut hits: Vec<(usize, u16)> = labels
+    // Pattern does the case folding and normalization the matcher requires.
+    // Handing a raw needle to fuzzy_match instead makes nucleo panic with
+    // "should have been caught by prefilter" as soon as the query carries an
+    // uppercase letter, because its prefilter folds case and the optimal pass
+    // does not, so the two disagree about whether there was a match. Every
+    // /dev/ttyUSB<n> query hits that.
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut hits: Vec<(usize, u32)> = labels
         .iter()
         .enumerate()
-        .filter_map(|(i, label)| {
-            matcher
-                .fuzzy_match(label.slice(..), needle.slice(..))
-                .map(|score| (i, score))
-        })
+        .filter_map(|(i, label)| pattern.score(label.slice(..), matcher).map(|score| (i, score)))
         .collect();
     hits.sort_by_key(|h| Reverse(h.1));
     hits.into_iter().map(|(i, _)| i).collect()
@@ -208,5 +213,48 @@ pub fn pick(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(items: &[&str]) -> Vec<Utf32String> {
+        items.iter().map(|s| Utf32String::from(*s)).collect()
+    }
+
+    // Regression: filtering used to hand the raw query to Matcher::fuzzy_match,
+    // which panics with "should have been caught by prefilter" on any uppercase
+    // input. Any port name carrying a capital reached it, so on a system whose
+    // ports are named /dev/ttyUSB<n> the picker took the whole program down
+    // rather than simply failing to match. Both casings must return a result.
+    #[test]
+    fn uppercase_query_does_not_panic() {
+        let items = labels(&[
+            "/dev/ttyUSB0  (dual channel bridge)",
+            "/dev/ttyUSB1  (dual channel bridge)",
+            "/dev/ttyUSB2  (single channel bridge)",
+        ]);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        assert_eq!(filter_items(&items, "ttyUSB2", &mut matcher).first(), Some(&2));
+        assert_eq!(filter_items(&items, "TTYUSB0", &mut matcher).first(), Some(&0));
+    }
+
+    #[test]
+    fn empty_query_keeps_every_item_in_order() {
+        let items = labels(&["COM3", "COM14"]);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        assert_eq!(filter_items(&items, "", &mut matcher), vec![0, 1]);
+    }
+
+    // COM1 must not win over COM14 just by being shorter, and a query that
+    // matches nothing has to come back empty rather than matching everything.
+    #[test]
+    fn filters_down_to_real_matches() {
+        let items = labels(&["COM1", "COM14", "/dev/ttyS0"]);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        assert_eq!(filter_items(&items, "COM14", &mut matcher), vec![1]);
+        assert!(filter_items(&items, "zzz", &mut matcher).is_empty());
     }
 }

@@ -13,7 +13,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use nucleo_matcher::{Config as FuzzyConfig, Matcher, Utf32String};
+use nucleo_matcher::{
+    Config as FuzzyConfig, Matcher, Utf32String,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -169,14 +172,18 @@ impl Ui {
             return;
         }
         let mut matcher = Matcher::new(FuzzyConfig::DEFAULT);
-        let needle = Utf32String::from(input.as_str());
-        let mut best: Option<(u16, &String)> = None;
+        // Pattern rather than a raw needle, for the same reason as in picker.rs.
+        // fuzzy_match panics on any uppercase input, because its prefilter folds
+        // case and the optimal pass does not. Here that would kill a live session
+        // as soon as a recalled command carried a capital.
+        let pattern = Pattern::parse(&input, CaseMatching::Ignore, Normalization::Smart);
+        let mut best: Option<(u32, &String)> = None;
         for cmd in &self.history {
             if *cmd == input {
                 continue;
             }
             let hay = Utf32String::from(cmd.as_str());
-            if let Some(score) = matcher.fuzzy_match(hay.slice(..), needle.slice(..))
+            if let Some(score) = pattern.score(hay.slice(..), &mut matcher)
                 && best.is_none_or(|(b, _)| score >= b)
             {
                 best = Some((score, cmd));
