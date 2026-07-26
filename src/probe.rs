@@ -60,6 +60,10 @@ mod imp {
         }
     }
 
+    impl Lock {
+        pub fn release(self) {}
+    }
+
     impl Drop for Lock {
         fn drop(&mut self) {
             unsafe {
@@ -107,11 +111,26 @@ mod imp {
         pub fn acquire() -> Lock {
             Lock
         }
+
+        pub fn release(self) {}
     }
 
+    // There is no cheap busy check here, so a port another process holds is
+    // only discovered by trying to open it.
     pub fn is_busy(_port: &str) -> bool {
         false
     }
 }
 
-pub use imp::{Lock, is_busy};
+use imp::Lock;
+pub use imp::is_busy;
+
+/// Run `f` while holding the cross-process probe lock, so two instances never
+/// probe or open the same port at the same instant and each report the other as
+/// busy.
+pub fn hold<T>(f: impl FnOnce() -> T) -> T {
+    let lock = Lock::acquire();
+    let out = f();
+    lock.release();
+    out
+}

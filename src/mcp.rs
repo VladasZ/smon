@@ -1,29 +1,23 @@
-//! The MCP side of smon: shared serial-console state plus a Streamable HTTP MCP
-//! server exposing the serial tools.
+//! The MCP side of smon: a Streamable HTTP server exposing the serial tools
+//! over the consoles a daemon owns.
 //!
-//! The serial session feeds received bytes into a rolling buffer here, and MCP
-//! tools read that buffer and queue input back through an inject channel that
-//! the session forwards to its port writer.
+//! Every tool takes an optional `console`. With one console open the name can be
+//! left out, and with several it is required, because picking a board for the
+//! caller is not something this may guess at.
 
 use std::{
+    future::pending,
     io::ErrorKind,
     net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc::Sender as ReadySender,
-    },
+    sync::{Arc, mpsc::Sender as ReadySender},
     thread,
-    time::{Duration, Instant},
 };
 
+use anyhow::{Result, anyhow};
 use axum::{
-    Json as HttpJson, Router,
-    extract::{Path as UrlPath, State},
-    http::StatusCode,
-    routing::post,
+    Router,
+    routing::{get, post},
 };
-use memchr::memmem;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
@@ -34,326 +28,20 @@ use rmcp::{
     },
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use tokio::{
-    net::TcpListener,
-    sync::{Notify, mpsc::UnboundedSender, oneshot},
+use serde::{Deserialize, Serialize};
+use tokio::{net::TcpListener, runtime::Builder, sync::oneshot};
+
+use crate::{
+    attach::attach,
+    console::Console,
+    http::call_http,
+    registry::{Adopt, Registry},
 };
 
-// Rolling buffer cap. At 115200 baud the console fills slowly, so a few hundred
-// KB keeps enough scrollback that expect() can still find a line that scrolled
-// past a moment ago. The buffer can grow to twice this before it is trimmed.
-const RING_CAP: usize = 512 * 1024;
-
-// Hard ceiling on a single expect() wait, so one call cannot block a client
-// forever. Longer waits are done by the client re-calling.
-const MAX_EXPECT_MS: u64 = 120_000;
-
-/// Input queued by an MCP tool for the session to write to the port. `echo` is
-/// the display form shown in the TUI; `resp` reports the write result back.
-pub struct Inject {
-    pub bytes: Vec<u8>,
-    pub echo:  String,
-    pub resp:  oneshot::Sender<Result<(), String>>,
-}
-
-/// The result of an [`Shared::expect`] wait.
-pub struct Expect {
-    pub matched:   bool,
-    pub data:      String,
-    pub cursor:    u64,
-    pub timed_out: bool,
-}
-
-/// A rolling window of recently received bytes, addressed by an absolute offset
-/// so a client can page through with a cursor even after old bytes are dropped.
-struct Ring {
-    buf:  Vec<u8>,
-    base: u64, // absolute offset of buf[0]
-}
-
-impl Ring {
-    fn new() -> Self {
-        Self {
-            buf:  Vec::new(),
-            base: 0,
-        }
-    }
-
-    fn total(&self) -> u64 {
-        self.base + self.buf.len() as u64
-    }
-
-    fn append(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-        // Trim in large chunks. Draining on every append would shift the whole
-        // buffer for each received chunk once full. Letting it grow to twice the
-        // cap first makes the shift amortized O(1) per byte.
-        if self.buf.len() > RING_CAP * 2 {
-            let drop = self.buf.len() - RING_CAP;
-            self.buf.drain(..drop);
-            self.base += drop as u64;
-        }
-    }
-
-    // Bytes from `cursor` to the end, plus the absolute offset the slice starts
-    // at. `cursor` is clamped into the retained window, so a cursor pointing at
-    // bytes already dropped simply starts at the oldest retained byte.
-    fn slice_from(&self, cursor: u64) -> (u64, &[u8]) {
-        let start = cursor.clamp(self.base, self.total());
-        let idx = (start - self.base) as usize;
-        (start, &self.buf[idx..])
-    }
-}
-
-// Either a plain substring or a compiled regex, matched against raw bytes so the
-// offsets it returns line up with the ring.
-enum Matcher {
-    Substr(Vec<u8>),
-    Regex(regex::bytes::Regex),
-}
-
-impl Matcher {
-    fn build(pattern: &str, regex: bool) -> Result<Self, String> {
-        if regex {
-            regex::bytes::Regex::new(pattern)
-                .map(Matcher::Regex)
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(Matcher::Substr(pattern.as_bytes().to_vec()))
-        }
-    }
-
-    // Offset just past the first match in `hay`, or None.
-    fn find_end(&self, hay: &[u8]) -> Option<usize> {
-        match self {
-            Matcher::Substr(needle) => memmem::find(hay, needle).map(|i| i + needle.len()),
-            Matcher::Regex(re) => re.find(hay).map(|m| m.end()),
-        }
-    }
-
-    // Where the next scan can resume after a miss that ended at absolute offset
-    // `end`. A substring hit can straddle the scanned region's edge by at most
-    // needle length minus one, so scanning restarts just before it. A regex can
-    // match a span of any length, so it rescans from `start` every time.
-    fn resume_from(&self, start: u64, end: u64) -> u64 {
-        match self {
-            Matcher::Substr(needle) => {
-                let overlap = needle.len().saturating_sub(1) as u64;
-                end.saturating_sub(overlap).max(start)
-            }
-            Matcher::Regex(_) => start,
-        }
-    }
-}
-
-/// The control byte for Ctrl+<c>. One shared mapping serves both the TUI
-/// keystrokes and the MCP serial_send_ctrl tool, so they cannot drift apart.
-pub fn ctrl_byte(c: char) -> Option<u8> {
-    let lower = c.to_ascii_lowercase();
-    Some(match lower {
-        'a'..='z' => (lower as u8) - b'a' + 1,
-        '@' => 0,
-        '[' => 0x1b,
-        '\\' => 0x1c,
-        ']' => 0x1d,
-        '^' => 0x1e,
-        '_' => 0x1f,
-        _ => return None,
-    })
-}
-
-/// Shared serial-console state. Cheap to clone via `Arc`. The reader thread
-/// appends received bytes; MCP tools read the buffer and queue input.
-pub struct Shared {
-    ring:      Mutex<Ring>,
-    notify:    Notify,
-    inject:    UnboundedSender<Inject>,
-    eol:       Vec<u8>,
-    port:      String,
-    baud:      u32,
-    connected: AtomicBool,
-}
-
-impl Shared {
-    pub fn new(port: String, baud: u32, eol: Vec<u8>, inject: UnboundedSender<Inject>) -> Arc<Self> {
-        Arc::new(Self {
-            ring: Mutex::new(Ring::new()),
-            notify: Notify::new(),
-            inject,
-            eol,
-            port,
-            baud,
-            connected: AtomicBool::new(true),
-        })
-    }
-
-    /// Called from the serial reader thread.
-    pub fn push_rx(&self, bytes: &[u8]) {
-        self.ring.lock().unwrap().append(bytes);
-        self.notify.notify_waiters();
-    }
-
-    pub fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, Ordering::Relaxed);
-    }
-
-    fn total(&self) -> u64 {
-        self.ring.lock().unwrap().total()
-    }
-
-    /// Bytes received since `cursor`, or the whole retained buffer if `None`,
-    /// with the new cursor to pass next time.
-    pub fn read(&self, cursor: Option<u64>) -> (String, u64) {
-        let ring = self.ring.lock().unwrap();
-        let start = cursor.unwrap_or(ring.base);
-        let (abs, hay) = ring.slice_from(start);
-        (
-            String::from_utf8_lossy(hay).into_owned(),
-            abs + hay.len() as u64,
-        )
-    }
-
-    pub fn snapshot(&self, lines: usize) -> String {
-        let ring = self.ring.lock().unwrap();
-        if lines == 0 {
-            return String::new();
-        }
-        // Scan backwards for the newline where the requested tail starts, so the
-        // cost tracks the answer size instead of the whole retained buffer. A
-        // trailing newline only terminates the last line, it does not start a
-        // new one.
-        let buf = &ring.buf;
-        let end = buf.len() - usize::from(buf.last() == Some(&b'\n'));
-        let mut count = 0;
-        let mut start = 0;
-        for i in (0..end).rev() {
-            if buf[i] == b'\n' {
-                count += 1;
-                if count == lines {
-                    start = i + 1;
-                    break;
-                }
-            }
-        }
-        let tail = String::from_utf8_lossy(&buf[start..]);
-        let all: Vec<&str> = tail.lines().collect();
-        all.join("\n")
-    }
-
-    /// Port name, baud, whether the port is still connected, and the current
-    /// read cursor.
-    pub fn status(&self) -> (String, u32, bool, u64) {
-        (
-            self.port.clone(),
-            self.baud,
-            self.connected.load(Ordering::Relaxed),
-            self.total(),
-        )
-    }
-
-    /// Write `text` to the port, appending the session end-of-line when
-    /// `newline`. Returns the cursor just before the write, so a following
-    /// read/expect captures the echo and reply.
-    pub async fn send(&self, text: String, newline: bool) -> Result<u64, String> {
-        let cursor = self.total();
-        let echo = text.clone();
-        let mut bytes = text.into_bytes();
-        if newline {
-            bytes.extend_from_slice(&self.eol);
-        }
-        self.inject_and_wait(bytes, echo).await?;
-        Ok(cursor)
-    }
-
-    /// Returns the cursor before the write.
-    pub async fn send_ctrl(&self, ctrl: char) -> Result<u64, String> {
-        let byte = ctrl_byte(ctrl).ok_or_else(|| format!("no control byte for '{ctrl}'"))?;
-        let cursor = self.total();
-        let echo = format!("Ctrl+{}", ctrl.to_ascii_uppercase());
-        self.inject_and_wait(vec![byte], echo).await?;
-        Ok(cursor)
-    }
-
-    async fn inject_and_wait(&self, bytes: Vec<u8>, echo: String) -> Result<(), String> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.inject
-            .send(Inject {
-                bytes,
-                echo,
-                resp: resp_tx,
-            })
-            .map_err(|_| "serial session closed".to_string())?;
-        match resp_rx.await {
-            Ok(result) => result,
-            Err(_) => Err("serial session closed".to_string()),
-        }
-    }
-
-    /// Wait until `pattern` appears in received data, or `timeout_ms` elapses.
-    /// Scans from `cursor` if given, else from the current end for new data only.
-    /// Returns the text from the start point up to and including the match, or
-    /// up to the end on timeout, plus the cursor to continue from.
-    pub async fn expect(
-        &self,
-        pattern: &str,
-        timeout_ms: u64,
-        regex: bool,
-        cursor: Option<u64>,
-    ) -> Result<Expect, String> {
-        let matcher = Matcher::build(pattern, regex)?;
-        let start = cursor.unwrap_or_else(|| self.total());
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_EXPECT_MS));
-        // Each scan resumes near where the previous one ended instead of
-        // rescanning everything from `start` for every received chunk.
-        let mut scan_from = start;
-
-        loop {
-            // Register interest before scanning so a byte that arrives between
-            // the scan and the wait cannot be missed.
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            {
-                let ring = self.ring.lock().unwrap();
-                let (scan_abs, scan_hay) = ring.slice_from(scan_from);
-                if let Some(end) = matcher.find_end(scan_hay) {
-                    let match_end = scan_abs + end as u64;
-                    let (abs, hay) = ring.slice_from(start);
-                    let data = &hay[..(match_end - abs) as usize];
-                    return Ok(Expect {
-                        matched:   true,
-                        data:      String::from_utf8_lossy(data).into_owned(),
-                        cursor:    match_end,
-                        timed_out: false,
-                    });
-                }
-                scan_from = matcher.resume_from(start, ring.total());
-            }
-
-            let now = Instant::now();
-            if now >= deadline {
-                let ring = self.ring.lock().unwrap();
-                let (abs, hay) = ring.slice_from(start);
-                return Ok(Expect {
-                    matched:   false,
-                    data:      String::from_utf8_lossy(hay).into_owned(),
-                    cursor:    abs + hay.len() as u64,
-                    timed_out: true,
-                });
-            }
-
-            tokio::select! {
-                () = &mut notified => {}
-                () = tokio::time::sleep(deadline - now) => {}
-            }
-        }
-    }
-}
-
-// ----- MCP server ----------------------------------------------------------
+// How many consecutive ports the TUI tries from the requested one, so several
+// standalone instances on one machine each get an endpoint. The daemon does not
+// hunt, a service that quietly moves its port is worse than one that fails.
+pub(crate) const PORT_HUNT_RANGE: u16 = 16;
 
 fn default_true() -> bool {
     true
@@ -363,95 +51,224 @@ fn default_lines() -> usize {
     40
 }
 
+fn default_baud() -> u32 {
+    115_200
+}
+
+fn default_eol() -> String {
+    "crlf".to_string()
+}
+
+fn default_ring_kb() -> usize {
+    crate::ring::DEFAULT_RING_CAP / 1024
+}
+
+/// Named by every tool. Left out when only one console is open.
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SendReq {
+pub(crate) struct Which {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SendReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
     /// Text to write to the serial port.
-    text: String,
-    /// Append the session end-of-line after the text. Default true.
+    pub text:    String,
+    /// Append the console end-of-line after the text. Default true.
     #[serde(default = "default_true")]
-    newline: bool,
+    pub newline: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SendCtrlReq {
+pub(crate) struct SendCtrlReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
     /// A single letter or symbol, e.g. "c" for Ctrl+C.
-    ctrl: String,
+    pub ctrl:    String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ReadReq {
+pub(crate) struct ReadReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
     /// Return output received after this cursor. Omit for the whole retained buffer.
     #[serde(default)]
-    cursor: Option<u64>,
+    pub cursor:  Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ExpectReq {
+pub(crate) struct ExpectReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console:    Option<String>,
     /// Text to wait for, or a regular expression when `regex` is true.
-    pattern: String,
+    pub pattern:    String,
     /// Give up after this many milliseconds. Capped at 120000.
-    timeout_ms: u64,
+    pub timeout_ms: u64,
     /// Treat `pattern` as a regular expression. Default false.
     #[serde(default)]
-    regex: bool,
+    pub regex:      bool,
     /// Scan from this cursor. Omit to wait for new output only.
     #[serde(default)]
-    cursor: Option<u64>,
+    pub cursor:     Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SnapshotReq {
+pub(crate) struct SnapshotReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
     /// How many trailing lines to return. Default 40.
     #[serde(default = "default_lines")]
-    lines: usize,
+    pub lines:   usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RollReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console: Option<String>,
+    /// Free-form text added to the file name, such as a ticket id. smon gives
+    /// it no meaning.
+    #[serde(default)]
+    pub tag:     Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct AdoptReq {
+    /// The serial device to take over, for example /dev/ttyUSB1 or COM7.
+    pub device:  String,
+    /// A name for it. smon gives it no meaning, it only makes the console
+    /// addressable by something shorter than its device path.
+    #[serde(default)]
+    pub label:   Option<String>,
+    #[serde(default = "default_baud")]
+    pub baud:    u32,
+    #[serde(default = "default_eol")]
+    pub eol:     String,
+    #[serde(default = "default_ring_kb")]
+    pub ring_kb: usize,
+}
+
+impl From<AdoptReq> for Adopt {
+    fn from(req: AdoptReq) -> Adopt {
+        Adopt {
+            device:  req.device,
+            label:   req.label,
+            baud:    req.baud,
+            eol:     req.eol,
+            ring_kb: req.ring_kb,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct Cursor {
+pub(crate) struct Cursor {
     /// Cursor just before the write. Read or expect from here to capture the reply.
-    cursor: u64,
+    pub cursor: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct ReadResult {
+pub(crate) struct ReadResult {
     /// Output text.
-    data: String,
+    pub data:   String,
     /// Cursor to pass next time to continue where this left off.
-    cursor: u64,
+    pub cursor: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct ExpectResult {
+pub(crate) struct ExpectResult {
     /// Whether the pattern was found before the timeout.
-    matched: bool,
+    pub matched:   bool,
     /// Output from the start point up to the match, or up to the end on timeout.
-    data: String,
+    pub data:      String,
     /// Cursor at the end of `data`.
-    cursor: u64,
+    pub cursor:    u64,
     /// Whether the wait timed out.
-    timed_out: bool,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct StatusResult {
+    /// The device path this console holds.
+    pub port:      String,
+    /// The console's label, when it has one.
+    pub label:     Option<String>,
+    pub baud:      u32,
+    pub connected: bool,
+    pub cursor:    u64,
+    /// The log segment currently being written.
+    pub log:       String,
+    /// True while another program has been handed the device.
+    #[serde(default)]
+    pub released:  bool,
+    /// The loopback port this console is offered as raw bytes on, when it is.
+    #[serde(default)]
+    pub bridge:    Option<u16>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct StatusResult {
-    port:      String,
-    baud:      u32,
-    connected: bool,
-    cursor:    u64,
+pub(crate) struct LogResult {
+    /// The log segment now being written.
+    pub path:    String,
+    /// When this segment was started, in local time.
+    pub started: String,
 }
 
-/// Cloned per session by the transport. Every clone shares the same `Shared`.
+pub(crate) fn status_of(console: &Arc<Console>) -> StatusResult {
+    StatusResult {
+        port:      console.device().to_string(),
+        label:     console.label().map(str::to_string),
+        baud:      console.baud(),
+        connected: console.connected(),
+        cursor:    console.total(),
+        log:       console.log_info().path.display().to_string(),
+        released:  console.released(),
+        bridge:    console.bridge_port(),
+    }
+}
+
+pub(crate) fn log_result(info: &crate::log::LogInfo) -> LogResult {
+    LogResult {
+        path:    info.path.display().to_string(),
+        started: info.started.format("%Y-%m-%d %H:%M:%S").to_string(),
+    }
+}
+
+/// Cloned per session by the transport. Every clone shares the same registry.
 #[derive(Clone)]
 struct Server {
-    state: Arc<Shared>,
+    registry: Arc<Registry>,
+}
+
+impl Server {
+    fn console(&self, name: Option<&str>) -> Result<Arc<Console>, McpError> {
+        self.registry
+            .resolve(name)
+            .map_err(|e| McpError::invalid_params(e, None))
+    }
 }
 
 #[tool_router]
 impl Server {
-    #[tool(description = "Write text to the serial port. Returns a cursor to read the reply from.")]
-    async fn serial_send(&self, Parameters(req): Parameters<SendReq>) -> Result<Json<Cursor>, McpError> {
+    #[tool(description = "List the consoles this smon owns, with label, device, baud and state.")]
+    async fn console_list(&self) -> Json<Vec<StatusResult>> {
+        Json(self.registry.all().iter().map(status_of).collect())
+    }
+
+    #[tool(description = "Write text to a serial console. Returns a cursor to read the reply from.")]
+    async fn serial_send(
+        &self,
+        Parameters(req): Parameters<SendReq>,
+    ) -> Result<Json<Cursor>, McpError> {
         let cursor = self
-            .state
+            .console(req.console.as_deref())?
             .send(req.text, req.newline)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
@@ -469,7 +286,7 @@ impl Server {
             .next()
             .ok_or_else(|| McpError::invalid_params("ctrl must be one character", None))?;
         let cursor = self
-            .state
+            .console(req.console.as_deref())?
             .send_ctrl(ch)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
@@ -477,9 +294,12 @@ impl Server {
     }
 
     #[tool(description = "Read serial output received since a cursor. Omit cursor for the whole buffer.")]
-    async fn serial_read(&self, Parameters(req): Parameters<ReadReq>) -> Json<ReadResult> {
-        let (data, cursor) = self.state.read(req.cursor);
-        Json(ReadResult { data, cursor })
+    async fn serial_read(
+        &self,
+        Parameters(req): Parameters<ReadReq>,
+    ) -> Result<Json<ReadResult>, McpError> {
+        let (data, cursor) = self.console(req.console.as_deref())?.read(req.cursor);
+        Ok(Json(ReadResult { data, cursor }))
     }
 
     #[tool(
@@ -490,7 +310,7 @@ impl Server {
         Parameters(req): Parameters<ExpectReq>,
     ) -> Result<Json<ExpectResult>, McpError> {
         let out = self
-            .state
+            .console(req.console.as_deref())?
             .expect(&req.pattern, req.timeout_ms, req.regex, req.cursor)
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -502,138 +322,149 @@ impl Server {
         }))
     }
 
-    #[tool(description = "Return the last N lines currently in the serial buffer.")]
-    async fn serial_snapshot(&self, Parameters(req): Parameters<SnapshotReq>) -> String {
-        self.state.snapshot(req.lines)
+    #[tool(description = "Return the last N lines currently in a console's buffer.")]
+    async fn serial_snapshot(
+        &self,
+        Parameters(req): Parameters<SnapshotReq>,
+    ) -> Result<String, McpError> {
+        Ok(self.console(req.console.as_deref())?.snapshot(req.lines))
     }
 
-    #[tool(description = "Report the serial port, baud, whether it is connected, and the current cursor.")]
-    async fn serial_status(&self) -> Json<StatusResult> {
-        let (port, baud, connected, cursor) = self.state.status();
-        Json(StatusResult {
-            port,
-            baud,
-            connected,
-            cursor,
-        })
+    #[tool(description = "Report a console's device, baud, connection state, cursor and log file.")]
+    async fn serial_status(
+        &self,
+        Parameters(req): Parameters<Which>,
+    ) -> Result<Json<StatusResult>, McpError> {
+        Ok(Json(status_of(&self.console(req.console.as_deref())?)))
+    }
+
+    #[tool(
+        description = "Start a new log file for a console and return its path. Call this at the start of a run so its output lands in a file of its own."
+    )]
+    async fn log_roll(
+        &self,
+        Parameters(req): Parameters<RollReq>,
+    ) -> Result<Json<LogResult>, McpError> {
+        let info = self
+            .console(req.console.as_deref())?
+            .log_roll(req.tag.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(Json(log_result(&info)))
+    }
+
+    #[tool(
+        description = "Take over a serial device that is not open here yet and start logging it. The device must exist and be free."
+    )]
+    async fn console_adopt(
+        &self,
+        Parameters(req): Parameters<AdoptReq>,
+    ) -> Result<Json<StatusResult>, McpError> {
+        let console = self
+            .registry
+            .adopt(req.into())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        Ok(Json(status_of(&console)))
+    }
+
+    #[tool(
+        description = "Let go of a console's device so another program can open it. The console keeps its buffer and log. Call console_hold to take it back."
+    )]
+    async fn console_release(
+        &self,
+        Parameters(req): Parameters<Which>,
+    ) -> Result<Json<StatusResult>, McpError> {
+        let console = self.console(req.console.as_deref())?;
+        if !console.release().await {
+            return Err(McpError::internal_error(
+                format!("{} did not let go of its device", console.name()),
+                None,
+            ));
+        }
+        Ok(Json(status_of(&console)))
+    }
+
+    #[tool(description = "Take a released console's device back and reopen it.")]
+    async fn console_hold(
+        &self,
+        Parameters(req): Parameters<Which>,
+    ) -> Result<Json<StatusResult>, McpError> {
+        let console = self.console(req.console.as_deref())?;
+        console.hold();
+        Ok(Json(status_of(&console)))
+    }
+
+    #[tool(description = "Report the log file a console is writing to now, and when it was started.")]
+    async fn log_info(
+        &self,
+        Parameters(req): Parameters<Which>,
+    ) -> Result<Json<LogResult>, McpError> {
+        let info = self.console(req.console.as_deref())?.log_info();
+        Ok(Json(log_result(&info)))
     }
 }
 
 #[tool_handler]
 impl ServerHandler for Server {}
 
-/// Start the MCP server on its own thread with its own tokio runtime. The bind
-/// result is reported once through `ready`, and on a bind failure the session
-/// ends the whole program, an unreachable smon is worse than no smon. The
-/// server stops when `shutdown` fires or the process exits.
+/// Serve on `bind` and block until the process ends. Used by the daemon, which
+/// binds exactly what it was told and fails loudly when that port is taken.
+///
+/// # Errors
+/// Returns an error if the runtime cannot start or the bind fails.
+pub fn run(bind: SocketAddr, registry: Arc<Registry>) -> Result<()> {
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|e| anyhow!("binding {bind}: {e}"))?;
+        let addr = listener.local_addr().unwrap_or(bind);
+        println!("smon: serving http://{addr}/mcp");
+        serve(listener, registry, None).await;
+        Ok(())
+    })
+}
+
+/// Start the server on its own thread with its own runtime, hunting for a free
+/// port. The bind result is reported once through `ready`, and the server stops
+/// when `shutdown` fires or the process exits. Used by the TUI.
 pub fn spawn(
     bind: SocketAddr,
-    state: Arc<Shared>,
+    registry: Arc<Registry>,
     ready: ReadySender<Result<SocketAddr, String>>,
     shutdown: oneshot::Receiver<()>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        // One local agent at a time talks to this server. A single-threaded
+        // One local client at a time talks to this server. A single-threaded
         // runtime is enough and avoids spawning a worker thread per core.
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let runtime = match Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(e) => {
-                let _ = ready.send(Err(format!("tokio runtime: {e}")));
+                report(&ready, Err(format!("tokio runtime: {e}")));
                 return;
             }
         };
-        runtime.block_on(serve(bind, state, ready, shutdown));
+        runtime.block_on(async move {
+            let listener = match bind_hunting(bind).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    report(&ready, Err(e));
+                    return;
+                }
+            };
+            let addr = listener.local_addr().unwrap_or(bind);
+            report(&ready, Ok(addr));
+            serve(listener, registry, Some(shutdown)).await;
+        });
     })
 }
 
-// How many consecutive ports to try from the requested one. Each running smon
-// instance takes one, so this is the number of instances that can serve MCP at
-// the same time.
-pub(crate) const PORT_HUNT_RANGE: u16 = 16;
-
-type CallError = (StatusCode, String);
-
-fn bad_request(e: String) -> CallError {
-    (StatusCode::BAD_REQUEST, e)
+// Whether the session was still waiting to hear where the server bound.
+fn report(ready: &ReadySender<Result<SocketAddr, String>>, outcome: Result<SocketAddr, String>) -> bool {
+    ready.send(outcome).is_ok()
 }
 
-fn internal(e: String) -> CallError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e)
-}
-
-fn parse_args<T: DeserializeOwned>(args: &str) -> Result<T, CallError> {
-    serde_json::from_str(args).map_err(|e| bad_request(e.to_string()))
-}
-
-fn respond<T: Serialize>(value: T) -> Result<HttpJson<Value>, CallError> {
-    serde_json::to_value(value)
-        .map(HttpJson)
-        .map_err(|e| internal(e.to_string()))
-}
-
-/// One-shot HTTP side door next to /mcp: POST /call/<tool> with the JSON
-/// arguments as the body, an empty body means no arguments. Same tools as MCP
-/// without the session handshake, so `smon call` and curl stay one-liners.
-async fn call_http(
-    UrlPath(tool): UrlPath<String>,
-    State(state): State<Arc<Shared>>,
-    body: String,
-) -> Result<HttpJson<Value>, CallError> {
-    let args = if body.trim().is_empty() { "{}" } else { body.as_str() };
-    match tool.as_str() {
-        "serial_send" => {
-            let req: SendReq = parse_args(args)?;
-            let cursor = state.send(req.text, req.newline).await.map_err(internal)?;
-            respond(Cursor { cursor })
-        }
-        "serial_send_ctrl" => {
-            let req: SendCtrlReq = parse_args(args)?;
-            let ch = req
-                .ctrl
-                .chars()
-                .next()
-                .ok_or_else(|| bad_request("ctrl must be one character".to_string()))?;
-            let cursor = state.send_ctrl(ch).await.map_err(internal)?;
-            respond(Cursor { cursor })
-        }
-        "serial_read" => {
-            let req: ReadReq = parse_args(args)?;
-            let (data, cursor) = state.read(req.cursor);
-            respond(ReadResult { data, cursor })
-        }
-        "serial_expect" => {
-            let req: ExpectReq = parse_args(args)?;
-            let out = state
-                .expect(&req.pattern, req.timeout_ms, req.regex, req.cursor)
-                .await
-                .map_err(bad_request)?;
-            respond(ExpectResult {
-                matched:   out.matched,
-                data:      out.data,
-                cursor:    out.cursor,
-                timed_out: out.timed_out,
-            })
-        }
-        "serial_snapshot" => {
-            let req: SnapshotReq = parse_args(args)?;
-            respond(state.snapshot(req.lines))
-        }
-        "serial_status" => {
-            let (port, baud, connected, cursor) = state.status();
-            respond(StatusResult {
-                port,
-                baud,
-                connected,
-                cursor,
-            })
-        }
-        other => Err((StatusCode::NOT_FOUND, format!("unknown tool '{other}'"))),
-    }
-}
-
-/// Bind the requested address. When the port is taken by another smon
-/// instance, hunt upward through the next ports so every instance gets its own
-/// endpoint. The caller learns the real port from the listener.
+/// Bind the requested address. When the port is taken by another instance, hunt
+/// upward through the next ports so every instance gets its own endpoint.
 async fn bind_hunting(bind: SocketAddr) -> Result<TcpListener, String> {
     for offset in 0..PORT_HUNT_RANGE {
         let Some(port) = bind.port().checked_add(offset) else {
@@ -654,47 +485,55 @@ async fn bind_hunting(bind: SocketAddr) -> Result<TcpListener, String> {
 }
 
 async fn serve(
-    bind: SocketAddr,
-    state: Arc<Shared>,
-    ready: ReadySender<Result<SocketAddr, String>>,
-    shutdown: oneshot::Receiver<()>,
+    listener: TcpListener,
+    registry: Arc<Registry>,
+    shutdown: Option<oneshot::Receiver<()>>,
 ) {
-    let listener = match bind_hunting(bind).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return;
+    for console in registry.all() {
+        if let Some(port) = console.bridge_port() {
+            tokio::spawn(crate::bridge::serve(console, port));
         }
-    };
-    let addr = listener.local_addr().unwrap_or(bind);
-    let _ = ready.send(Ok(addr));
+    }
 
-    let http_state = Arc::clone(&state);
+    let http_registry = Arc::clone(&registry);
     let service = StreamableHttpService::new(
-        move || Ok(Server { state: Arc::clone(&state) }),
+        move || {
+            Ok(Server {
+                registry: Arc::clone(&registry),
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
     let app = Router::new()
         .route_service("/mcp", service)
         .route("/call/{tool}", post(call_http))
-        .with_state(http_state);
+        .route("/attach/{console}", get(attach))
+        .with_state(http_registry);
 
     let graceful = async move {
-        let _ = shutdown.await;
+        match shutdown {
+            // A stop signal, or the session going away without sending one.
+            // Both end the server, so the two cases are deliberately the same.
+            Some(rx) => rx.await.unwrap_or(()),
+            // The daemon serves until the process ends.
+            None => pending().await,
+        }
     };
-    let _ = axum::serve(listener, app)
+    match axum::serve(listener, app)
         .with_graceful_shutdown(graceful)
-        .await;
+        .await
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("smon: http server stopped: {e}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::{runtime::Builder, sync::mpsc::unbounded_channel};
-
     use super::*;
 
-    // Two smon instances must not fight over one MCP port, the second hunts on.
+    // Two standalone instances must not fight over one port, the second hunts on.
     #[test]
     fn bind_hunting_skips_taken_port() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
@@ -708,79 +547,14 @@ mod tests {
         });
     }
 
+    // The daemon must not quietly move to another port. A taken bind is a
+    // misconfiguration and has to be visible.
     #[test]
-    fn ring_drops_oldest_and_tracks_offset() {
-        let mut ring = Ring::new();
-        ring.append(b"hello ");
-        ring.append(b"world");
-        assert_eq!(ring.total(), 11);
-        let (abs, slice) = ring.slice_from(6);
-        assert_eq!(abs, 6);
-        assert_eq!(slice, b"world");
-    }
-
-    #[test]
-    fn ring_cursor_before_window_clamps_to_base() {
-        let mut ring = Ring { buf: Vec::new(), base: 100 };
-        ring.append(b"abc");
-        let (abs, slice) = ring.slice_from(0);
-        assert_eq!(abs, 100);
-        assert_eq!(slice, b"abc");
-    }
-
-    #[test]
-    fn substr_match_returns_offset_past_match() {
-        let m = Matcher::build("ready> ", false).unwrap();
-        // "ready> " sits at bytes 11..18, so the offset just past it is 18.
-        assert_eq!(m.find_end(b"value = 1\r\nready> "), Some(18));
-        assert_eq!(m.find_end(b"still running"), None);
-    }
-
-    #[test]
-    fn regex_match_finds_tagged_line() {
-        let m = Matcher::build(r"\(T\d\)", true).unwrap();
-        // "(T2)" sits at bytes 8..12, so the offset just past it is 12.
-        assert_eq!(m.find_end(b"timeout (T2) 61 sec"), Some(12));
-        assert_eq!(m.find_end(b"timeout pending"), None);
-    }
-
-    #[test]
-    fn ctrl_byte_maps_letters_and_symbols() {
-        assert_eq!(ctrl_byte('c'), Some(3));
-        assert_eq!(ctrl_byte('C'), Some(3));
-        assert_eq!(ctrl_byte('['), Some(0x1b));
-        assert_eq!(ctrl_byte('1'), None);
-    }
-
-    #[test]
-    fn substr_scan_resumes_with_overlap_and_regex_rescans() {
-        let sub = Matcher::build("abc", false).unwrap();
-        assert_eq!(sub.resume_from(0, 100), 98);
-        assert_eq!(sub.resume_from(99, 100), 99); // never before the start cursor
-        let re = Matcher::build("a.*b", true).unwrap();
-        assert_eq!(re.resume_from(5, 100), 5);
-    }
-
-    // The inject receiver is dropped, these tests never send input.
-    fn shared() -> Arc<Shared> {
-        let tx = unbounded_channel().0;
-        Shared::new("COM1".to_string(), 115200, b"\r\n".to_vec(), tx)
-    }
-
-    #[test]
-    fn snapshot_returns_last_lines() {
-        let s = shared();
-        s.push_rx(b"one\r\ntwo\r\nthree\r\npartial");
-        assert_eq!(s.snapshot(2), "three\npartial");
-        assert_eq!(s.snapshot(10), "one\ntwo\nthree\npartial");
-        assert_eq!(s.snapshot(0), "");
-    }
-
-    #[test]
-    fn snapshot_ignores_trailing_newline() {
-        let s = shared();
-        s.push_rx(b"a\nb\n");
-        assert_eq!(s.snapshot(1), "b");
-        assert_eq!(s.snapshot(2), "a\nb");
+    fn the_daemon_bind_does_not_hunt() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let taken = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let addr = taken.local_addr().unwrap();
+        let error = run(addr, Registry::new(Vec::new(), 0)).unwrap_err().to_string();
+        assert!(error.contains(&addr.to_string()), "{error}");
     }
 }

@@ -14,8 +14,9 @@ cargo install smon
 smon
 ```
 
-smon lists the available serial ports and lets you pick one with an fzf-style
-filter. Type to filter, arrow keys to move, Enter to select. The list refreshes
+smon lists what you can attach to and lets you pick with an fzf-style filter.
+That list is the consoles a running smon already holds, followed by the serial
+ports on this machine. Type to filter, arrow keys to move, Enter to select. The list refreshes
 about once a second. A port already opened by another program or another smon is
 shown dimmed and marked `busy`, and cannot be picked. Busy detection currently
 works on Windows. After you pick a port smon asks for a baud rate and connects.
@@ -44,15 +45,6 @@ replugged, smon keeps the scrollback, marks the session as
 disconnected in the title, and reconnects on its own as soon as the port is
 back.
 
-The line ending is chosen once at launch with `--eol` and defaults to `crlf`:
-
-```
-smon --eol crlf   # \r\n, the default
-smon --eol cr     # \r
-smon --eol lf     # \n
-smon --eol none   # send nothing extra
-```
-
 ### Autocomplete
 
 Sent commands are saved and offered back as you type. The best fuzzy match from
@@ -68,11 +60,17 @@ port selection.
 
 ### Session logs
 
-Every session is written to its own log file in real time. Each entry has a
-timestamp and a direction marker: incoming bytes are tagged `RX`, lines you send
-are tagged `TX`. Control bytes are escaped so the file stays readable plain text.
-The file name holds the port and the start time, for example
+Every console is written to a log file in real time. Each entry has a timestamp
+and a direction marker: incoming bytes are tagged `RX`, lines you send are tagged
+`TX`. Control bytes are escaped so the file stays readable plain text. The file
+name holds the console and the start time, for example
 `smon-COM3-20260629-143205.log`.
+
+A log is a sequence of segments. A new one starts when the date changes, and a
+client can start one at any time with `log_roll`, which returns the path. A run
+that does that first can read its own output back from exactly that file instead
+of picking its own lines out of a whole day. Segments older than
+`log_retention_days` are deleted, 30 days by default.
 
 Logs are stored in:
 
@@ -93,6 +91,81 @@ The baud per port and the command history live in `config.json`, found in:
 - `$XDG_CONFIG_HOME/smon/` or `~/.config/smon/` on Linux and macOS
 - `%APPDATA%\smon\` on Windows
 
+## Daemon
+
+A daemon owns its serial ports and never lets go, so the consoles are up from
+boot with nobody logged in, everything the devices say is captured whether or not
+anyone is watching, and a monitor that dies does not take the port with it.
+
+```
+smon daemon --config /etc/smon/daemon.toml
+```
+
+The config lists the consoles. Only `device` is required:
+
+```toml
+bind = "127.0.0.1:4123"
+log_retention_days = 30
+
+[[console]]
+device = "/dev/serial/by-id/usb-FTDI_TTL232R-3V3_FTCBUHQA-if00-port0"
+label = "left"
+baud = 115200
+ring_kb = 512
+bridge_port = 4224
+```
+
+Point `device` at a `/dev/serial/by-id/...` path rather than `/dev/ttyUSB0`. The
+ttyUSB numbers are handed out in probe order, so with two adapters a replug can
+swap them and a label would then name the wrong device.
+
+`label` is a name for the console and nothing more. smon attaches no meaning to
+it, it just lets a client say `left` instead of the whole path.
+
+With no `--config` the first of `$SMON_CONFIG`, `<config dir>/smon/daemon.toml`
+and `/etc/smon/daemon.toml` is used.
+
+### Attaching
+
+Plain `smon` finds a daemon on this machine and offers its consoles. Picking one
+attaches over a websocket rather than opening the device, so it works while the
+daemon holds the port, and several people can watch the same console at once and
+see each other's input.
+
+Picking a serial port the daemon does not hold hands it to the daemon first, so
+it stays up and keeps being logged after you quit the viewer. With no daemon
+running at all, the port is opened here and everything behaves as it always did.
+
+`--host <ssh target>` attaches to a daemon on another machine:
+
+```
+smon --host pi
+```
+
+The daemon binds loopback only and is never put on a network. `--host` opens an
+ssh tunnel itself and talks through that, so it inherits whatever already guards
+ssh to that host and opens nothing new.
+
+### Raw bridge
+
+A console with a `bridge_port` is also offered as a plain byte stream on that
+loopback port, which is what pyserial reaches with `socket://127.0.0.1:4224`. A
+program that would otherwise need the device node can use that instead, so
+nothing has to be stopped first, and what it says to the device is recorded in
+the console log like any other input.
+
+For anything that truly needs the device node, `console_release` makes smon let
+go and `console_hold` takes it back. See [docs/mcp.md](docs/mcp.md).
+
+The line ending is chosen once at launch with `--eol` and defaults to `crlf`:
+
+```
+smon --eol crlf   # \r\n, the default
+smon --eol cr     # \r
+smon --eol lf     # \n
+smon --eol none   # send nothing extra
+```
+
 ## MCP server
 
 smon also serves a small [Model Context Protocol](https://modelcontextprotocol.io)
@@ -101,26 +174,27 @@ you can at the TUI. It exposes tools such as `serial_send`, `serial_read`, and
 `serial_expect`.
 
 It is always on and listens on `http://127.0.0.1:4123/mcp` over Streamable HTTP,
-localhost only. Change the bind with `--mcp`:
+loopback only. Change the bind with `--mcp`:
 
 ```
 smon --mcp 127.0.0.1:5000
 ```
 
-If that port is already taken, by another smon for example, smon walks up to the
-next free one, so every running instance serves its own endpoint.
+Every tool takes an optional `console`. With one console open it can be left
+out, with several it is required.
 
 ### Driving it from a shell
 
 The smon binary is its own client, so no curl and no MCP session are needed.
-`smon list` prints every running instance with its MCP port, serial port, baud
-and connection state. `smon call <port> <tool> [json]` calls one tool and prints
-the result.
+`smon list` prints every console a running smon owns. `smon call <tool> [json]`
+calls one tool and prints the result. Both take `--host` to reach another
+machine over ssh.
 
 ```
 smon list
-smon call 4123 serial_status
-smon call 4124 serial_send '{"text":"version","newline":true}'
+smon call console_list
+smon call serial_send '{"console":"left","text":"version"}'
+smon call serial_status --host pi
 ```
 
 See [docs/mcp.md](docs/mcp.md) for the tool list and how to connect a client.

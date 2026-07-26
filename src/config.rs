@@ -68,7 +68,7 @@ fn config_path() -> Option<PathBuf> {
     Some(config_dir()?.join("smon").join("config.json"))
 }
 
-fn config_dir() -> Option<PathBuf> {
+pub fn config_dir() -> Option<PathBuf> {
     if let Some(xdg) = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())

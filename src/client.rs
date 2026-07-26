@@ -1,6 +1,6 @@
-//! One-shot CLI client for the /call side door of a running smon instance.
-//! Plain blocking HTTP over a localhost socket, no client dependencies, so
-//! `smon call` and `smon list` work anywhere the binary does.
+//! One-shot CLI client for the /call side door of a running smon.
+//! Plain blocking HTTP over a socket, no client dependencies, so `smon call`
+//! and `smon list` work anywhere the binary does.
 
 use std::{
     io::{Read, Write},
@@ -9,59 +9,92 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
 
-use crate::{DEFAULT_MCP, mcp::PORT_HUNT_RANGE};
+use crate::mcp::{PORT_HUNT_RANGE, StatusResult};
 
 // serial_expect can legitimately wait 120 s, everything else answers instantly.
 const READ_TIMEOUT: Duration = Duration::from_secs(125);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Call one tool on the smon instance serving the given local port and return
-/// the response body, a JSON document.
-pub fn call(port: u16, tool: &str, args: &str) -> Result<String> {
-    let stream = connect(port, CONNECT_TIMEOUT)
-        .with_context(|| format!("no smon MCP on port {port}, try smon list"))?;
-    request(stream, port, tool, args)
+/// Call one tool on the smon serving `addr` and return the response body, a
+/// JSON document.
+///
+/// # Errors
+/// Returns an error if nothing is listening, the reply is not HTTP, or the tool
+/// reports a failure.
+pub fn call(addr: SocketAddr, tool: &str, args: &str) -> Result<String> {
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .with_context(|| format!("no smon on {addr}, is the daemon running"))?;
+    request(stream, addr, tool, args)
 }
 
-/// Probe the port hunt range on localhost and print one line per running
-/// instance: MCP port, serial port, baud, connection state.
-pub fn list() -> Result<()> {
-    let base = DEFAULT_MCP.parse::<SocketAddr>()?.port();
-    let mut found = 0;
-    for port in base..base.saturating_add(PORT_HUNT_RANGE) {
-        let Ok(stream) = connect(port, Duration::from_millis(200)) else {
-            continue;
-        };
-        let body = request(stream, port, "serial_status", "{}")?;
-        let status: Value = serde_json::from_str(&body)
-            .with_context(|| format!("bad serial_status reply from port {port}"))?;
-        let serial = status["port"].as_str().unwrap_or("?");
-        let baud = status["baud"].as_u64().unwrap_or(0);
-        let connected = if status["connected"].as_bool().unwrap_or(false) {
-            "connected"
-        } else {
-            "disconnected"
-        };
-        println!("{port}  {serial}  {baud}  {connected}");
-        found += 1;
+/// Print one line per console the smon at `addr` owns.
+///
+/// # Errors
+/// Returns an error if the endpoint cannot be reached or its reply is not the
+/// expected shape.
+pub fn list(addr: SocketAddr) -> Result<()> {
+    let body = call(addr, "console_list", "{}")?;
+    let consoles: Vec<StatusResult> =
+        serde_json::from_str(&body).with_context(|| format!("bad console_list reply: {body}"))?;
+    if consoles.is_empty() {
+        println!("smon on {addr} owns no consoles");
+        return Ok(());
     }
-    if found == 0 {
-        println!("no running smon instances found on ports {base}..{}", base + PORT_HUNT_RANGE - 1);
+    for console in consoles {
+        let label = console.label.as_deref().unwrap_or("-");
+        let state = if console.connected { "connected" } else { "disconnected" };
+        println!("{label}  {}  {}  {state}", console.port, console.baud);
     }
     Ok(())
 }
 
-fn connect(port: u16, timeout: Duration) -> Result<TcpStream> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    Ok(TcpStream::connect_timeout(&addr, timeout)?)
+/// A console some smon on this machine already holds.
+pub struct Console {
+    pub name:      String,
+    pub connected: bool,
 }
 
-fn request(mut stream: TcpStream, port: u16, tool: &str, args: &str) -> Result<String> {
+/// A reachable smon and what it owns.
+pub struct Daemon {
+    pub addr:     SocketAddr,
+    pub consoles: Vec<Console>,
+}
+
+/// Find an smon on this machine, starting at `bind` and walking the hunt range.
+///
+/// Used by the TUI before it opens anything: a console another instance already
+/// holds cannot be opened again, so it is attached to instead.
+pub fn find_daemon(bind: SocketAddr) -> Option<Daemon> {
+    let end = bind.port().saturating_add(PORT_HUNT_RANGE - 1);
+    for port in bind.port()..=end {
+        let addr = SocketAddr::new(bind.ip(), port);
+        let Ok(body) = call(addr, "console_list", "{}") else {
+            continue;
+        };
+        let Ok(listed) = serde_json::from_str::<Vec<StatusResult>>(&body) else {
+            continue;
+        };
+        let consoles: Vec<Console> = listed
+            .into_iter()
+            .map(|c| Console {
+                // The label is how the console is addressed when it has one,
+                // and the device path is the name when it does not.
+                name:      c.label.unwrap_or(c.port),
+                connected: c.connected,
+            })
+            .collect();
+        if !consoles.is_empty() {
+            return Some(Daemon { addr, consoles });
+        }
+    }
+    None
+}
+
+fn request(mut stream: TcpStream, addr: SocketAddr, tool: &str, args: &str) -> Result<String> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let request = format!(
-        "POST /call/{tool} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{args}",
+        "POST /call/{tool} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{args}",
         args.len(),
     );
     stream.write_all(request.as_bytes())?;
@@ -70,7 +103,7 @@ fn request(mut stream: TcpStream, port: u16, tool: &str, args: &str) -> Result<S
     let text = String::from_utf8_lossy(&raw);
     let (head, body) = text
         .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("malformed HTTP response from port {port}"))?;
+        .ok_or_else(|| anyhow!("malformed HTTP response from {addr}"))?;
     let status_line = head.lines().next().unwrap_or_default();
     if !status_line.contains(" 200 ") {
         bail!("{tool} failed, {status_line}: {body}");
@@ -80,29 +113,62 @@ fn request(mut stream: TcpStream, port: u16, tool: &str, args: &str) -> Result<S
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, mpsc};
+    use std::{
+        env, fs,
+        sync::{Arc, mpsc},
+        thread::sleep,
+    };
 
-    use tokio::sync::{mpsc::unbounded_channel, oneshot};
+    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::mcp::{self, Shared};
+    use crate::{console::{Console, ConsoleSpec}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
 
     #[test]
     fn call_roundtrip_via_http_side_door() {
-        let inject = unbounded_channel().0;
-        let state = Shared::new("COMTEST".to_string(), 9600, b"\r\n".to_vec(), inject);
+        let dir = env::temp_dir().join("smon-client-test");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        let log = ConsoleLog::open_in(dir.clone(), "COMTEST", 0, None).unwrap();
+        let console = Console::new(
+            ConsoleSpec {
+                device:   "COMTEST".to_string(),
+                label:    Some("under-test".to_string()),
+                baud:     9600,
+                eol:      b"\r\n".to_vec(),
+                ring_cap: DEFAULT_RING_CAP,
+                bridge:   None,
+            },
+            log,
+            mpsc::channel().0,
+        );
+        let registry = Registry::new(vec![Arc::clone(&console)], 0);
+
         let (ready_tx, ready_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), Arc::clone(&state), ready_tx, shutdown_rx);
+        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, ready_tx, shutdown_rx);
 
         let addr = ready_rx.recv().unwrap().unwrap();
-        let body = call(addr.port(), "serial_status", "").unwrap();
+        let body = call(addr, "serial_status", "").unwrap();
         assert!(body.contains("COMTEST"), "unexpected body: {body}");
+        assert!(body.contains("under-test"), "label missing: {body}");
 
-        let error = call(addr.port(), "no_such_tool", "{}").unwrap_err().to_string();
+        // The name is how a client addresses a console, so it has to work over
+        // the wire and not only in the registry's own tests.
+        let by_label = call(addr, "serial_snapshot", r#"{"console":"under-test"}"#).unwrap();
+        assert_eq!(by_label, "\"\"");
+        let missing = call(addr, "serial_status", r#"{"console":"nope"}"#).unwrap_err().to_string();
+        assert!(missing.contains("400"), "unexpected error: {missing}");
+
+        let error = call(addr, "no_such_tool", "{}").unwrap_err().to_string();
         assert!(error.contains("404"), "unexpected error: {error}");
 
-        shutdown_tx.send(()).expect("server thread ended early");
-        server.join().expect("server thread panicked");
+        assert!(shutdown_tx.send(()).is_ok(), "server thread ended early");
+        // The server is detached on purpose, so give it a moment to unbind
+        // rather than joining a thread a client could be holding open.
+        sleep(Duration::from_millis(50));
+        drop(server);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

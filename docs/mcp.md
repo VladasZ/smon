@@ -8,33 +8,35 @@ way a person can at the TUI.
 
 - Transport: Streamable HTTP.
 - URL: `http://127.0.0.1:4123/mcp`.
-- Always on. It starts with the serial session, no flag needed.
-- Localhost only. Pass `--mcp <host:port>` to change the bind, for example
-  `smon --mcp 127.0.0.1:5000`.
+- Always on. The daemon serves it, and so does a standalone TUI, no flag needed.
+- Loopback only. Pass `--mcp <host:port>` to change the bind, for example
+  `smon --mcp 127.0.0.1:5000`. To reach another machine use `--host`, which
+  tunnels over ssh rather than putting a console on the network.
 
-When the requested port is taken, by another smon instance for example, smon
-hunts upward through the next ports, 16 in total, and serves on the first free
-one. Every running instance therefore has its own endpoint. A client finds the
-instance for a given serial port by probing the ports in order and checking
-`serial_status`, which reports the COM port each instance monitors. When the
-whole range is taken smon exits with `mcp bind failed`, a running smon without
-a reachable MCP endpoint is not allowed.
+The daemon binds exactly what it was told and fails loudly when that port is
+taken, because a service that quietly moves is worse than one that stops. A
+standalone TUI does hunt upward through the next ports, 16 in total, so several
+of them on one machine each get an endpoint. When the whole range is taken it
+exits with `mcp bind failed`, a running smon without a reachable endpoint is not
+allowed.
 
 The bound endpoint is recorded in the session log file as `mcp serving ...`.
 The TUI itself does not show it.
 
 ## One-shot calls from a shell
 
-The smon binary is its own client. `smon list` probes the port range and
-prints every running instance, MCP port, serial port, baud, connection state.
-`smon call <port> <tool> [json-args]` calls one tool and prints the JSON
-result, string results print raw.
+The smon binary is its own client. `smon list` prints every console a running
+smon owns. `smon call <tool> [json-args]` calls one tool and prints the JSON
+result, string results print raw. Both take `--host <ssh target>` to reach an
+smon on another machine, and open the ssh tunnel themselves.
 
 ```
 smon list
-smon call 4123 serial_status
-smon call 4124 serial_send '{"text":"reboot","newline":true}'
-smon call 4124 serial_expect '{"pattern":"ready> ","timeout_ms":10000,"cursor":0}'
+smon call console_list
+smon call serial_status '{"console":"left"}'
+smon call serial_send '{"console":"left","text":"reboot","newline":true}'
+smon call serial_expect '{"console":"left","pattern":"ready> ","timeout_ms":10000,"cursor":0}'
+smon list --host pi                      # the same, against another machine over ssh
 ```
 
 Under the hood this uses a plain HTTP side door next to /mcp on the same bind:
@@ -56,6 +58,16 @@ claude mcp add --transport http smon http://127.0.0.1:4123/mcp
 Any MCP client that speaks Streamable HTTP works the same way, by pointing it at
 the URL.
 
+## Naming a console
+
+One smon can hold several consoles, so every tool takes an optional `console`,
+either a label or a device path. With one console open it can be left out. With
+several it is required: picking a board for the caller is the one thing this
+must never guess at, so a call without a name is an error listing what there is.
+
+`console_list` takes no arguments and answers the same either way, so it is what
+a client uses to find out what exists.
+
 ## Tools
 
 Every read returns a `cursor`, an absolute byte offset into the received stream.
@@ -63,12 +75,44 @@ Pass it back to read or wait for only what arrived since.
 
 | Tool | Parameters | Returns |
 | --- | --- | --- |
-| `serial_send` | `text`, `newline` (default true) | `cursor` before the write |
-| `serial_send_ctrl` | `ctrl` (one char, e.g. `c` for Ctrl+C) | `cursor` before the write |
-| `serial_read` | `cursor` (optional) | `data`, next `cursor` |
-| `serial_expect` | `pattern`, `timeout_ms`, `regex` (default false), `cursor` (optional) | `matched`, `data`, `cursor`, `timed_out` |
-| `serial_snapshot` | `lines` (default 40) | the last N lines as text |
-| `serial_status` | none | `port`, `baud`, `connected`, `cursor` |
+| `console_list` | none | one entry per console, as `serial_status` |
+| `serial_send` | `console`, `text`, `newline` (default true) | `cursor` before the write |
+| `serial_send_ctrl` | `console`, `ctrl` (one char, e.g. `c` for Ctrl+C) | `cursor` before the write |
+| `serial_read` | `console`, `cursor` (optional) | `data`, next `cursor` |
+| `serial_expect` | `console`, `pattern`, `timeout_ms`, `regex` (default false), `cursor` (optional) | `matched`, `data`, `cursor`, `timed_out` |
+| `serial_snapshot` | `console`, `lines` (default 40) | the last N lines as text |
+| `serial_status` | `console` | `port`, `label`, `baud`, `connected`, `cursor`, `log`, `released`, `bridge` |
+| `log_roll` | `console`, `tag` (optional) | `path`, `started` of the new log segment |
+| `log_info` | `console` | `path`, `started` of the current segment |
+| `console_release` | `console` | status, once the device is really closed |
+| `console_hold` | `console` | status, after taking the device back |
+| `console_adopt` | `device`, `label`, `baud`, `eol`, `ring_kb` | status of the new console |
+
+### Taking over a device later
+
+`console_adopt` hands a device that is not open yet to a running smon, which is
+what the TUI does when you pick a port the daemon does not already hold. The
+device has to exist and be free, and a failure to open it is reported rather
+than leaving behind a console that never connects. A console adopted this way
+cannot have a `bridge_port`, since the bridge listeners start with the server,
+so put a console that needs one in the config file.
+
+### Giving a run its own log
+
+`log_roll` closes the current log segment and starts a new one, returning where
+it went. A run that calls it first can read its own output back from exactly
+that path instead of searching a day-sized file for its own lines. `tag` is
+added to the file name, a ticket id for example, and smon gives it no meaning.
+
+### Handing the device over
+
+`console_release` makes smon let go of the serial device so another program can
+open it, and it does not return until the port is actually closed, so the caller
+can open it the moment the call comes back. The console keeps its buffer, its log
+and its viewers throughout. `console_hold` takes the device back.
+
+Usually nothing needs this, because a console with a `bridge_port` is already
+reachable as a raw byte stream, see the daemon section of the README.
 
 ### The cursor and expect model
 
@@ -95,9 +139,14 @@ return an error and `serial_status` reports `connected: false`. smon retries
 the port every second and reconnects on its own, after which `connected` flips
 back to true. Cursors stay valid across a disconnect.
 
-## Sharing with the TUI
+A console with a stable `/dev/serial/by-id/...` path also survives a replug that
+hands the adapter a different `ttyUSB` number, because the path it reopens is the
+one that does not move.
 
-The person at the TUI and MCP clients share one console. Input an MCP client
-sends is written to the port from the same place as keystrokes, echoed in the
-scrollback as a magenta `>>` line, and recorded in the log as `[mcp]`. Several
-clients can connect at once, each keeping its own read cursor.
+## Sharing a console
+
+Everyone watching a console sees the same thing. Input from an MCP client is
+written to the port from the same place as a keystroke, shown in every attached
+TUI as a magenta `>>` line, and recorded in the log as `[mcp]`. Input through a
+raw bridge is recorded as `[bridge]`. Several clients can connect at once, each
+keeping its own read cursor.
