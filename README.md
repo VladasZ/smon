@@ -8,6 +8,23 @@ Minimalistic TUI serial monitor.
 cargo install smon
 ```
 
+## Updating
+
+```
+smon update
+```
+
+This downloads the newest release built for your platform, checks it against the
+published SHA256SUMS, runs it once to confirm it works, and only then swaps the
+installed binary. Name a version to install that exact one, for example
+`smon update v0.1.2`, which also lets you go back to an older release. Add
+`--from-source` to build with cargo instead of downloading.
+
+Replacing the file on disk changes nothing for an smon that is already running,
+so the update finishes by telling each one on this machine to stand down. A
+daemon comes back on the new binary. A TUI just exits, so open sessions end.
+You are asked first, unless you pass `--yes`.
+
 ## Usage
 
 ```

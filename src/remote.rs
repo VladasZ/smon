@@ -224,10 +224,9 @@ impl Remote {
 mod tests {
     use std::{env, fs, sync::mpsc, thread::sleep};
 
-    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::{console::{Console, ConsoleSpec}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
+    use crate::{console::{Console, ConsoleSpec}, control::{Control, Role}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
 
     // Both directions over a real socket against a real server. The console
     // here has no device, so the input it receives is read straight off the
@@ -257,9 +256,9 @@ mod tests {
         console.push_rx(b"said before the viewer arrived\n");
 
         let (ready_tx, ready_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let registry = Registry::new(vec![Arc::clone(&console)], 0);
-        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, ready_tx, shutdown_rx);
+        let control = Arc::new(Control::new(Role::Tui));
+        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, Arc::clone(&control), ready_tx);
         let addr = ready_rx.recv().unwrap().unwrap();
 
         let mut viewer = attach(&addr.to_string(), "under-test").unwrap();
@@ -287,7 +286,7 @@ mod tests {
             "the viewer never saw output sent after it attached"
         );
 
-        assert!(shutdown_tx.send(()).is_ok(), "server thread ended early");
+        assert!(control.release(), "server thread ended early");
         sleep(Duration::from_millis(50));
         drop(server);
         fs::remove_dir_all(&dir).unwrap();

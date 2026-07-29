@@ -6,7 +6,6 @@
 //! caller is not something this may guess at.
 
 use std::{
-    future::pending,
     io::ErrorKind,
     net::SocketAddr,
     sync::{Arc, mpsc::Sender as ReadySender},
@@ -16,6 +15,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use axum::{
     Router,
+    extract::FromRef,
     routing::{get, post},
 };
 use rmcp::{
@@ -34,9 +34,30 @@ use tokio::{net::TcpListener, runtime::Builder, sync::oneshot};
 use crate::{
     attach::attach,
     console::Console,
+    control::Control,
     http::call_http,
     registry::{Adopt, Registry},
 };
+
+/// The consoles a request can reach, and the process serving them. Handlers take
+/// whichever half they need, so the ones that only touch consoles are unchanged.
+#[derive(Clone)]
+pub struct AppState {
+    pub registry: Arc<Registry>,
+    pub control:  Arc<Control>,
+}
+
+impl FromRef<AppState> for Arc<Registry> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.registry)
+    }
+}
+
+impl FromRef<AppState> for Arc<Control> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.control)
+    }
+}
 
 // How many consecutive ports the TUI tries from the requested one, so several
 // standalone instances on one machine each get an endpoint. The daemon does not
@@ -411,7 +432,7 @@ impl ServerHandler for Server {}
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start or the bind fails.
-pub fn run(bind: SocketAddr, registry: Arc<Registry>) -> Result<()> {
+pub fn run(bind: SocketAddr, registry: Arc<Registry>, control: Arc<Control>) -> Result<()> {
     let runtime = Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async move {
         let listener = TcpListener::bind(bind)
@@ -419,20 +440,26 @@ pub fn run(bind: SocketAddr, registry: Arc<Registry>) -> Result<()> {
             .map_err(|e| anyhow!("binding {bind}: {e}"))?;
         let addr = listener.local_addr().unwrap_or(bind);
         println!("smon: serving http://{addr}/mcp");
-        serve(listener, registry, None).await;
+        // The daemon serves until the process ends, or until an update asks it
+        // to let the port go so its replacement can bind.
+        let (release, stopped) = oneshot::channel();
+        control.arm(release);
+        serve(listener, AppState { registry, control }, stopped).await;
         Ok(())
     })
 }
 
 /// Start the server on its own thread with its own runtime, hunting for a free
 /// port. The bind result is reported once through `ready`, and the server stops
-/// when `shutdown` fires or the process exits. Used by the TUI.
+/// when `control` releases it or the process exits. Used by the TUI.
 pub fn spawn(
     bind: SocketAddr,
     registry: Arc<Registry>,
+    control: Arc<Control>,
     ready: ReadySender<Result<SocketAddr, String>>,
-    shutdown: oneshot::Receiver<()>,
 ) -> thread::JoinHandle<()> {
+    let (release, shutdown) = oneshot::channel();
+    control.arm(release);
     thread::spawn(move || {
         // One local client at a time talks to this server. A single-threaded
         // runtime is enough and avoids spawning a worker thread per core.
@@ -453,7 +480,7 @@ pub fn spawn(
             };
             let addr = listener.local_addr().unwrap_or(bind);
             report(&ready, Ok(addr));
-            serve(listener, registry, Some(shutdown)).await;
+            serve(listener, AppState { registry, control }, shutdown).await;
         });
     })
 }
@@ -484,22 +511,18 @@ async fn bind_hunting(bind: SocketAddr) -> Result<TcpListener, String> {
     ))
 }
 
-async fn serve(
-    listener: TcpListener,
-    registry: Arc<Registry>,
-    shutdown: Option<oneshot::Receiver<()>>,
-) {
-    for console in registry.all() {
+async fn serve(listener: TcpListener, state: AppState, shutdown: oneshot::Receiver<()>) {
+    for console in state.registry.all() {
         if let Some(port) = console.bridge_port() {
             tokio::spawn(crate::bridge::serve(console, port));
         }
     }
 
-    let http_registry = Arc::clone(&registry);
+    let mcp_registry = Arc::clone(&state.registry);
     let service = StreamableHttpService::new(
         move || {
             Ok(Server {
-                registry: Arc::clone(&registry),
+                registry: Arc::clone(&mcp_registry),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -509,17 +532,11 @@ async fn serve(
         .route_service("/mcp", service)
         .route("/call/{tool}", post(call_http))
         .route("/attach/{console}", get(attach))
-        .with_state(http_registry);
+        .with_state(state);
 
-    let graceful = async move {
-        match shutdown {
-            // A stop signal, or the session going away without sending one.
-            // Both end the server, so the two cases are deliberately the same.
-            Some(rx) => rx.await.unwrap_or(()),
-            // The daemon serves until the process ends.
-            None => pending().await,
-        }
-    };
+    // A stop signal, or the sender going away without sending one. Both end the
+    // server, so the two cases are deliberately the same.
+    let graceful = async move { shutdown.await.unwrap_or(()) };
     match axum::serve(listener, app)
         .with_graceful_shutdown(graceful)
         .await
@@ -532,6 +549,7 @@ async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::Role;
 
     // Two standalone instances must not fight over one port, the second hunts on.
     #[test]
@@ -554,7 +572,8 @@ mod tests {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let taken = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
         let addr = taken.local_addr().unwrap();
-        let error = run(addr, Registry::new(Vec::new(), 0)).unwrap_err().to_string();
+        let control = Arc::new(Control::new(Role::Daemon));
+        let error = run(addr, Registry::new(Vec::new(), 0), control).unwrap_err().to_string();
         assert!(error.contains(&addr.to_string()), "{error}");
     }
 }

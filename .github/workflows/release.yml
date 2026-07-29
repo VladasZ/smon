@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to increase
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+  push:
+    tags:
+      # Full versions only, so a two component tag can never start a run that
+      # builds all five targets before the version guard kills it.
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bump the version and tag it
+        id: pick
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # A pushed tag is the manual escape hatch, the version is already set.
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "releasing the pushed tag $GITHUB_REF_NAME"
+            exit 0
+          fi
+
+          manifest=Cargo.toml
+          current=$(grep -m1 '^version = ' "$manifest" | cut -d'"' -f2)
+          IFS=. read -r major minor patch <<< "$current"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "unknown bump '$BUMP'" >&2; exit 1 ;;
+          esac
+          next="$major.$minor.$patch"
+          tag="v$next"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists" >&2
+            exit 1
+          fi
+
+          # Only the first version line is the package version, the rest of the
+          # manifest is dependencies.
+          awk -v cur="$current" -v newver="$next" '
+            !done && $0 == "version = \"" cur "\"" {
+              print "version = \"" newver "\""
+              done = 1
+              next
+            }
+            { print }
+          ' "$manifest" > "$manifest.tmp"
+          mv "$manifest.tmp" "$manifest"
+
+          if ! grep -q "^version = \"$next\"\$" "$manifest"; then
+            echo "could not rewrite the version in $manifest" >&2
+            exit 1
+          fi
+          cargo update --workspace
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$manifest" Cargo.lock
+          git commit -m "release $tag"
+          git tag "$tag"
+          git push origin HEAD
+          git push origin "refs/tags/$tag"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "bumped $current to $next"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
+            ext: tar.gz
+          - target: universal-apple-darwin
+            os: macos-15
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            ext: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            ext: zip
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Check the tag matches the crate version
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${TAG#v}" != "$crate" ]; then
+            echo "tag $TAG does not match crate version $crate" >&2
+            exit 1
+          fi
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        env:
+          # aws-lc-rs, under reqwest's rustls, compiles C, so musl-gcc is needed
+          # to build those sources. Linking is deliberately left to Rust's own
+          # self-contained musl, because using musl-gcc as the linker driver
+          # produces a dynamically linked binary, and that binary then dies on
+          # any distro without a musl loader.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+            cargo build --release --target x86_64-apple-darwin
+            cargo build --release --target aarch64-apple-darwin
+            lipo -create -output dist/smon \
+              target/x86_64-apple-darwin/release/smon \
+              target/aarch64-apple-darwin/release/smon
+          else
+            rustup target add "${{ matrix.target }}"
+            cargo build --release --target "${{ matrix.target }}"
+            if [ "${{ matrix.ext }}" = "zip" ]; then
+              cp "target/${{ matrix.target }}/release/smon.exe" dist/smon.exe
+            else
+              cp "target/${{ matrix.target }}/release/smon" dist/smon
+            fi
+          fi
+
+      - name: Check the musl binary is static
+        if: contains(matrix.target, 'linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A dynamically linked musl binary looks fine here and then fails to
+          # start on any distro without a musl loader, so catch it before it
+          # ships rather than in a user's terminal.
+          if readelf -l dist/smon | grep -q INTERP; then
+            echo "the musl build is dynamically linked, it must be static" >&2
+            readelf -l dist/smon | grep -A1 INTERP >&2
+            exit 1
+          fi
+          echo "musl binary is static"
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="smon-$TAG-${{ matrix.target }}.${{ matrix.ext }}"
+          cd dist
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            powershell -NoProfile -Command \
+              "Compress-Archive -Path 'smon.exe' -DestinationPath '$asset' -Force"
+          else
+            tar -czf "$asset" smon
+          fi
+          echo "packaged $asset"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/smon-*.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum smon-*.* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "$TAG" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          # The release can already exist with no assets on it when the tag was
+          # pushed by hand. Fill that one in rather than failing, and still
+          # create it when it is absent.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, filling in its assets"
+            gh release upload "$TAG" assets/smon-*.* assets/SHA256SUMS --clobber
+            notes=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" -q .body)
+            gh release edit "$TAG" --title "$TAG" --notes "$notes" $prerelease
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              $prerelease \
+              assets/smon-*.* assets/SHA256SUMS
+          fi
+
+      # Publishing to crates.io is deliberately not here. The token stays on the
+      # release machine, so run `cargo publish` there once this finishes, and
+      # only then is the release actually out.
+      - name: Say what is left to do
+        run: echo "now run 'git pull --rebase' and 'cargo publish' locally"

@@ -15,13 +15,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use ratatui::DefaultTerminal;
 use serde::Serialize;
 use serialport::{SerialPortType, available_ports};
-use tokio::sync::oneshot;
 
 use crate::{
     attached::Local,
     client,
     config::Config,
     console::{Console, ConsoleSpec},
+    control::{Control, Role},
     log::{ConsoleLog, DEFAULT_RETENTION_DAYS},
     mcp, picker, probe,
     registry::Registry,
@@ -52,9 +52,13 @@ pub fn run(eol: Vec<u8>, mcp_bind: SocketAddr, remote: bool) -> Result<()> {
     if remote && daemon.is_none() {
         bail!("no smon answering through the tunnel at {mcp_bind}");
     }
+    let control = Arc::new(Control::new(Role::Tui));
     let mut terminal = ratatui::init();
-    let result = pick_and_attach(&mut terminal, &eol, mcp_bind, daemon.as_ref(), remote);
+    let result = pick_and_attach(&mut terminal, &eol, mcp_bind, daemon.as_ref(), remote, &control);
     ratatui::restore();
+    if control.stopping() {
+        println!("smon: stopped by an update, start it again to use the new version");
+    }
     result
 }
 
@@ -64,6 +68,7 @@ fn pick_and_attach(
     mcp_bind: SocketAddr,
     daemon: Option<&client::Daemon>,
     remote: bool,
+    control: &Arc<Control>,
 ) -> Result<()> {
     loop {
         let Some(choice) = select_port(terminal, daemon, remote)? else {
@@ -74,7 +79,7 @@ fn pick_and_attach(
                 bail!("no smon to attach {console} to");
             };
             let mut attached = remote::attach(&daemon.addr.to_string(), console)?;
-            return session::run(terminal, &mut attached);
+            return session::run(terminal, &mut attached, control);
         }
         let device = choice;
         let Some(baud) = pick_baud(terminal, &device)? else {
@@ -91,9 +96,9 @@ fn pick_and_attach(
         if let Some(daemon) = daemon {
             let name = adopt(daemon, &device, baud, eol)?;
             let mut attached = remote::attach(&daemon.addr.to_string(), &name)?;
-            return session::run(terminal, &mut attached);
+            return session::run(terminal, &mut attached, control);
         }
-        return attach(terminal, &device, baud, eol, mcp_bind);
+        return attach(terminal, &device, baud, eol, mcp_bind, control);
     }
 }
 
@@ -103,6 +108,7 @@ fn attach(
     baud: u32,
     eol: &[u8],
     mcp_bind: SocketAddr,
+    control: &Arc<Control>,
 ) -> Result<()> {
     let log = ConsoleLog::open(device, DEFAULT_RETENTION_DAYS, None)?;
     let (inject_tx, inject_rx) = channel();
@@ -123,7 +129,7 @@ fn attach(
     // ending the session and losing the scrollback.
     let runner = Runner::start(Arc::clone(&console), inject_rx, true)?;
 
-    let server = match start_server(&console, mcp_bind) {
+    let server = match start_server(&console, mcp_bind, Arc::clone(control)) {
         Ok(server) => server,
         Err(e) => {
             runner.stop();
@@ -132,7 +138,7 @@ fn attach(
     };
 
     let mut local = Local::new(Arc::clone(&console), BACKLOG_LINES);
-    let result = session::run(terminal, &mut local);
+    let result = session::run(terminal, &mut local, control);
 
     if !server.stop() {
         console.note("mcp server had already stopped");
@@ -173,8 +179,8 @@ fn eol_name(eol: &[u8]) -> &'static str {
 }
 
 struct Server {
-    shutdown: oneshot::Sender<()>,
-    thread:   thread::JoinHandle<()>,
+    control: Arc<Control>,
+    thread:  thread::JoinHandle<()>,
 }
 
 impl Server {
@@ -182,7 +188,7 @@ impl Server {
     // rather than joined: a client holding a stream open can keep graceful
     // shutdown from returning, so quitting must not wait on a client.
     fn stop(self) -> bool {
-        let told = self.shutdown.send(()).is_ok();
+        let told = self.control.release();
         drop(self.thread);
         told
     }
@@ -190,19 +196,15 @@ impl Server {
 
 // An agent must always be able to reach a running smon, so a failed bind ends
 // the session instead of degrading to a monitor without an endpoint.
-fn start_server(console: &Arc<Console>, bind: SocketAddr) -> Result<Server> {
+fn start_server(console: &Arc<Console>, bind: SocketAddr, control: Arc<Control>) -> Result<Server> {
     let (ready_tx, ready_rx) = channel();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let registry = Registry::new(vec![Arc::clone(console)], 0);
-    let thread = mcp::spawn(bind, registry, ready_tx, shutdown_rx);
+    let thread = mcp::spawn(bind, registry, Arc::clone(&control), ready_tx);
 
     match ready_rx.recv_timeout(READY_WAIT) {
         Ok(Ok(addr)) => {
             console.note(&format!("mcp serving http://{addr}/mcp"));
-            Ok(Server {
-                shutdown: shutdown_tx,
-                thread,
-            })
+            Ok(Server { control, thread })
         }
         Ok(Err(e)) => Err(anyhow!("mcp bind failed: {e}")),
         Err(e) => Err(anyhow!("mcp server did not start: {e}")),

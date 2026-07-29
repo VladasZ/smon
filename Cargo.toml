@@ -18,19 +18,28 @@ anyhow = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 chrono = { workspace = true }
 crossterm = { workspace = true }
+dirs = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true }
+hex = { workspace = true }
+indicatif = { workspace = true }
 memchr = { workspace = true }
 nucleo-matcher = { workspace = true }
 ratatui = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serialport = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }
+which = { workspace = true }
+zip = { workspace = true }
 
 [workspace]
 resolver = "3"
@@ -40,16 +49,27 @@ anyhow = "1.0.102"
 axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.29.0"
+dirs = "6.0"
+flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+hex = "0.4"
+indicatif = "0.18"
 memchr = "2.8"
 nucleo-matcher = "0.3.1"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 regex = "1"
+# rustls rather than the default native-tls, so the musl release builds link no
+# openssl and stay static.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 rmcp = { version = "2.0.0", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serialport = "4.9.0"
+sha2 = "0.11"
+tar = "0.4"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 tokio-tungstenite = "0.30"
 toml = "1.1"
+which = "8.0"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

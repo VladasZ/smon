@@ -43,6 +43,12 @@ Under the hood this uses a plain HTTP side door next to /mcp on the same bind:
 `POST /call/<tool>` with the JSON arguments as the body, no MCP session
 needed, so curl works too: `curl -d '{}' http://127.0.0.1:4123/call/serial_status`.
 
+Two calls live on that side door only and are absent from the MCP tool list,
+`smon_info` and `smon_restart`. They are what `smon update` uses to find running
+smon processes and stand them down. Standing a process down drops every console
+and every viewer on it, and an agent cannot tell that someone is watching one in
+another terminal, so this is not a decision to hand to a model.
+
 Note for agents: do not write temp wrapper scripts around the endpoint, use
 `smon call`. If something is still too clunky, propose an smon improvement so
 the friction gets fixed in the tool once rather than re-scripted every session.

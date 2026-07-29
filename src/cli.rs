@@ -4,7 +4,10 @@ use std::{iter::Peekable, net::SocketAddr};
 
 use anyhow::{Context, Result, bail};
 
-use crate::settings::{DEFAULT_BIND, eol_bytes};
+use crate::{
+    settings::{DEFAULT_BIND, eol_bytes},
+    update::Request,
+};
 
 pub const USAGE: &str = r#"smon - minimalistic TUI serial monitor
 
@@ -12,6 +15,7 @@ Usage: smon [options]
        smon daemon [--config <path>] [--mcp <host:port>]
        smon list [--host <ssh target>]
        smon call <tool> [json-args] [--host <ssh target>]
+       smon update [version] [--from-source] [--yes]
 
 Subcommands:
   daemon                     own every console in the config file and serve them
@@ -19,8 +23,14 @@ Subcommands:
   call <tool> [json]         call one tool, for example
                              smon call serial_status
                              smon call serial_send '{"console":"left","text":"reboot"}'
+  update [version]           install the newest release, or the version named.
+                             This restarts the daemon and kills every other smon
+                             running here, so open sessions end.
 
 Options:
+  --from-source            build the update with cargo instead of downloading a
+                           prebuilt binary
+  --yes                    do not ask before killing running smon processes
   --eol <cr|lf|crlf|none>  line ending appended to sent lines, default crlf
   --config <path>          daemon config file, default the first of $SMON_CONFIG,
                            <config dir>/smon/daemon.toml, /etc/smon/daemon.toml
@@ -55,16 +65,23 @@ pub enum Cli {
         tool: String,
         args: String,
     },
+    Update {
+        /// Where to look for the smon processes this update has to stand down.
+        mcp:     SocketAddr,
+        request: Request,
+    },
     Help,
     Version,
 }
 
 #[derive(Default)]
 struct Flags {
-    eol:    Option<String>,
-    mcp:    Option<String>,
-    config: Option<String>,
-    host:   Option<String>,
+    eol:         Option<String>,
+    mcp:         Option<String>,
+    config:      Option<String>,
+    host:        Option<String>,
+    from_source: bool,
+    yes:         bool,
 }
 
 /// # Errors
@@ -83,6 +100,8 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Cli> {
             "--mcp" => flags.mcp = Some(value(&mut args, "--mcp")?),
             "--config" => flags.config = Some(value(&mut args, "--config")?),
             "--host" => flags.host = Some(value(&mut args, "--host")?),
+            "--from-source" => flags.from_source = true,
+            "--yes" => flags.yes = true,
             other => {
                 if let Some(v) = other.strip_prefix("--eol=") {
                     flags.eol = Some(v.to_string());
@@ -102,7 +121,30 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Cli> {
     }
 
     let (command, rest) = words.split_first().map_or(("", &[][..]), |(c, r)| (c.as_str(), r));
+    if command != "update" {
+        let named = if command.is_empty() { "the monitor" } else { command };
+        deny_flag(flags.from_source, "--from-source", named)?;
+        deny_flag(flags.yes, "--yes", named)?;
+    }
     match command {
+        "update" => {
+            deny(flags.eol.as_ref(), "--eol", "update")?;
+            deny(flags.config.as_ref(), "--config", "update")?;
+            // The tunnel only carries the side door, it cannot put a file on
+            // the far machine, so updating one is a separate feature.
+            deny(flags.host.as_ref(), "--host", "update")?;
+            if rest.len() > 1 {
+                bail!("update takes at most one version");
+            }
+            Ok(Cli::Update {
+                mcp:     endpoint(flags.mcp.as_deref())?,
+                request: Request {
+                    version:     rest.first().cloned(),
+                    from_source: flags.from_source,
+                    yes:         flags.yes,
+                },
+            })
+        }
         "daemon" => {
             reject(rest, "daemon takes no arguments")?;
             // Each console names its own line ending in the config, so a single
@@ -165,6 +207,13 @@ fn reject(rest: &[String], message: &str) -> Result<()> {
 
 fn deny(flag: Option<&String>, name: &str, command: &str) -> Result<()> {
     if flag.is_none() {
+        return Ok(());
+    }
+    bail!("{name} means nothing to {command}")
+}
+
+fn deny_flag(set: bool, name: &str, command: &str) -> Result<()> {
+    if !set {
         return Ok(());
     }
     bail!("{name} means nothing to {command}")
@@ -285,6 +334,50 @@ mod tests {
             panic!("expected Cli::List");
         };
         assert_eq!(host.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn update_takes_an_optional_version_and_its_own_flags() {
+        let Ok(Cli::Update { mcp, request }) = parse_args(&["update"]) else {
+            panic!("expected Cli::Update");
+        };
+        assert_eq!(mcp.to_string(), DEFAULT_BIND);
+        assert_eq!(request.version, None);
+        assert!(!request.from_source);
+        assert!(!request.yes);
+
+        let Ok(Cli::Update { request, .. }) =
+            parse_args(&["update", "v0.1.2", "--from-source", "--yes"])
+        else {
+            panic!("expected Cli::Update");
+        };
+        assert_eq!(request.version.as_deref(), Some("v0.1.2"));
+        assert!(request.from_source);
+        assert!(request.yes);
+    }
+
+    #[test]
+    fn update_refuses_a_second_version_and_flags_it_cannot_use() {
+        assert!(parse_args(&["update", "v0.1.2", "v0.1.3"]).is_err());
+        assert!(parse_args(&["update", "--eol", "cr"]).is_err());
+        assert!(parse_args(&["update", "--config", "x"]).is_err());
+    }
+
+    // The tunnel carries the side door only, it cannot put a file on the far
+    // machine, so accepting --host would update the wrong one silently.
+    #[test]
+    fn update_refuses_a_remote_host() {
+        let error = parse_args(&["update", "--host", "pi"]).unwrap_err().to_string();
+        assert!(error.contains("--host"), "{error}");
+    }
+
+    #[test]
+    fn the_update_flags_mean_nothing_to_other_subcommands() {
+        assert!(parse_args(&["--yes"]).is_err());
+        assert!(parse_args(&["--from-source"]).is_err());
+        assert!(parse_args(&["daemon", "--yes"]).is_err());
+        assert!(parse_args(&["list", "--from-source"]).is_err());
+        assert!(parse_args(&["call", "serial_status", "--yes"]).is_err());
     }
 
     #[test]

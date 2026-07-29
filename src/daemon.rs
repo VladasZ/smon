@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     console::{Console, ConsoleSpec},
+    control::{Control, Role},
     log::ConsoleLog,
     mcp,
     registry::Registry,
@@ -70,5 +71,20 @@ pub fn run(config: Option<&str>, bind: Option<SocketAddr>) -> Result<()> {
         consoles.push(console);
     }
 
-    mcp::run(bind, Registry::new(consoles, settings.log_retention_days))
+    // Captured before serving, so an update that renames the binary away cannot
+    // leave this process unable to name the file it has to come back on.
+    let control = Arc::new(Control::new(Role::Daemon));
+    mcp::run(
+        bind,
+        Registry::new(consoles, settings.log_retention_days),
+        Arc::clone(&control),
+    )?;
+
+    if !control.stopping() {
+        return Ok(());
+    }
+    // The server has already let the port go, and every serial fd is O_CLOEXEC,
+    // so the replacement finds nothing of this process still holding a device.
+    println!("smon: restarting on the updated binary");
+    control.relaunch()
 }

@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::{
     console::Console,
+    control::Control,
     mcp::{
         AdoptReq, Cursor, ExpectReq, ExpectResult, ReadReq, ReadResult, RollReq, SendCtrlReq,
         SendReq, SnapshotReq, Which, log_result, status_of,
@@ -28,6 +29,7 @@ type CallError = (StatusCode, String);
 pub async fn call_http(
     UrlPath(tool): UrlPath<String>,
     State(registry): State<Arc<Registry>>,
+    State(control): State<Arc<Control>>,
     body: String,
 ) -> Result<HttpJson<Value>, CallError> {
     let args = if body.trim().is_empty() { "{}" } else { body.as_str() };
@@ -35,6 +37,15 @@ pub async fn call_http(
         "console_list" => {
             let all: Vec<_> = registry.all().iter().map(status_of).collect();
             respond(all)
+        }
+        // Deliberately absent from the MCP router. Standing a process down drops
+        // every console and every viewer on it, and an agent cannot know that
+        // someone is watching one in another terminal.
+        "smon_info" => respond(control.info(registry.all().len())),
+        "smon_restart" => {
+            let info = control.info(registry.all().len());
+            control.request_stop();
+            respond(info)
         }
         "serial_send" => {
             let req: SendReq = parse_args(args)?;
@@ -137,4 +148,82 @@ fn respond<T: Serialize>(value: T) -> Result<HttpJson<Value>, CallError> {
     serde_json::to_value(value)
         .map(HttpJson)
         .map_err(|e| internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        sync::{Arc, mpsc},
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+
+
+    use crate::{
+        client::call,
+        console::{Console, ConsoleSpec},
+        control::{Control, Info, Role},
+        log::ConsoleLog,
+        mcp,
+        registry::Registry,
+        ring::DEFAULT_RING_CAP,
+    };
+
+    // The whole update flow rests on this: a running smon must report what it is
+    // and then actually let its port go when told, or the replacement process
+    // cannot bind and the machine is left with nothing serving.
+    #[test]
+    fn a_restart_request_reports_the_process_and_frees_the_port() {
+        let dir = env::temp_dir().join("smon-restart-test");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        let log = ConsoleLog::open_in(dir.clone(), "COMTEST", 0, None).unwrap();
+        let console = Console::new(
+            ConsoleSpec {
+                device:   "COMTEST".to_string(),
+                label:    Some("under-test".to_string()),
+                baud:     9600,
+                eol:      b"\r\n".to_vec(),
+                ring_cap: DEFAULT_RING_CAP,
+                bridge:   None,
+            },
+            log,
+            mpsc::channel().0,
+        );
+        let registry = Registry::new(vec![Arc::clone(&console)], 0);
+        let control = Arc::new(Control::new(Role::Daemon));
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let server = mcp::spawn(
+            "127.0.0.1:0".parse().unwrap(),
+            registry,
+            Arc::clone(&control),
+            ready_tx,
+        );
+        let addr = ready_rx.recv().unwrap().unwrap();
+
+        let info: Info = serde_json::from_str(&call(addr, "smon_info", "{}").unwrap()).unwrap();
+        assert_eq!(info.role, Role::Daemon);
+        assert_eq!(info.consoles, 1);
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.pid, std::process::id());
+
+        // Answered before standing down, so the caller learns which process it
+        // just stopped rather than losing the reply to the shutdown.
+        let told: Info =
+            serde_json::from_str(&call(addr, "smon_restart", "{}").unwrap()).unwrap();
+        assert_eq!(told.pid, info.pid);
+        assert!(control.stopping());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while call(addr, "smon_info", "{}").is_ok() {
+            assert!(Instant::now() < deadline, "the server never let {addr} go");
+            sleep(Duration::from_millis(20));
+        }
+
+        drop(server);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

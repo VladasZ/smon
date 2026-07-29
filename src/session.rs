@@ -14,11 +14,18 @@ use crate::{
     attached::{Attached, Polled},
     config::Config,
     console::ConsoleEvent,
+    control::Control,
     draw::draw,
     ui::Ui,
 };
 
-pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached) -> Result<()> {
+/// # Errors
+/// Returns an error if the screen cannot be drawn.
+pub fn run(
+    terminal: &mut DefaultTerminal,
+    attached: &mut dyn Attached,
+    control: &Control,
+) -> Result<()> {
     let mut config = Config::load();
     let mut ui = Ui {
         history: config.history.clone(),
@@ -31,6 +38,12 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached) -> Resul
     let mut dirty = true;
 
     loop {
+        // An update replaced the binary, so this session is the last thing
+        // still running the old one.
+        if control.stopping() {
+            return Ok(());
+        }
+
         loop {
             match attached.poll() {
                 Polled::Event(ConsoleEvent::Rx(bytes)) => ui.push_rx(&bytes),

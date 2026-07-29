@@ -11,6 +11,7 @@ mod cli;
 mod client;
 mod config;
 mod console;
+mod control;
 mod daemon;
 mod draw;
 mod frame;
@@ -28,6 +29,7 @@ mod settings;
 mod tui;
 mod tunnel;
 mod ui;
+mod update;
 mod wsl;
 
 fn main() -> Result<()> {
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
             let reached = reach(mcp, host.as_deref())?;
             client::list(reached.addr)
         }
+        Cli::Update { mcp, request } => update::update(&request, mcp),
         Cli::Daemon { config, mcp } => daemon::run(config.as_deref(), mcp),
         Cli::Run { eol, mcp, host } => {
             let reached = reach(mcp, host.as_deref())?;

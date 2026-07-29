@@ -119,10 +119,9 @@ mod tests {
         thread::sleep,
     };
 
-    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::{console::{Console, ConsoleSpec}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
+    use crate::{console::{Console, ConsoleSpec}, control::{Control, Role}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
 
     #[test]
     fn call_roundtrip_via_http_side_door() {
@@ -146,8 +145,8 @@ mod tests {
         let registry = Registry::new(vec![Arc::clone(&console)], 0);
 
         let (ready_tx, ready_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, ready_tx, shutdown_rx);
+        let control = Arc::new(Control::new(Role::Tui));
+        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, Arc::clone(&control), ready_tx);
 
         let addr = ready_rx.recv().unwrap().unwrap();
         let body = call(addr, "serial_status", "").unwrap();
@@ -164,7 +163,7 @@ mod tests {
         let error = call(addr, "no_such_tool", "{}").unwrap_err().to_string();
         assert!(error.contains("404"), "unexpected error: {error}");
 
-        assert!(shutdown_tx.send(()).is_ok(), "server thread ended early");
+        assert!(control.release(), "server thread ended early");
         // The server is detached on purpose, so give it a moment to unbind
         // rather than joining a thread a client could be holding open.
         sleep(Duration::from_millis(50));
