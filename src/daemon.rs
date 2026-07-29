@@ -5,7 +5,10 @@
 //! its port and reconnects on its own, so an adapter that is unplugged at boot
 //! costs that one console and not the service.
 
-use std::{net::SocketAddr, sync::Arc, sync::mpsc::channel};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, mpsc::channel},
+};
 
 use anyhow::{Context, Result};
 
@@ -39,8 +42,7 @@ pub fn run(config: Option<&str>, bind: Option<SocketAddr>) -> Result<()> {
     // detach its thread, but holding them keeps the ownership honest.
     let mut runners = Vec::new();
     for wanted in &settings.consoles {
-        let eol = eol_bytes(&wanted.eol)
-            .with_context(|| format!("console {}", wanted.device))?;
+        let eol = eol_bytes(&wanted.eol).with_context(|| format!("console {}", wanted.device))?;
         // The log is named after the label when there is one, so a by-id device
         // path does not become a 60 character file name.
         let name = wanted.label.as_deref().unwrap_or(&wanted.device);
@@ -50,12 +52,12 @@ pub fn run(config: Option<&str>, bind: Option<SocketAddr>) -> Result<()> {
         let (inject_tx, inject_rx) = channel();
         let console = Console::new(
             ConsoleSpec {
-                device:   wanted.device.clone(),
-                label:    wanted.label.clone(),
-                baud:     wanted.baud,
+                device: wanted.device.clone(),
+                label: wanted.label.clone(),
+                baud: wanted.baud,
                 eol,
                 ring_cap: wanted.ring_kb.saturating_mul(1024),
-                bridge:   wanted.bridge_port,
+                bridge: wanted.bridge_port,
             },
             log,
             inject_tx,

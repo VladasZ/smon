@@ -2,8 +2,8 @@
 //! ask of it.
 //!
 //! A console does not own the device. The runner does, and it feeds received
-//! bytes in here. Input goes the other way, queued on the inject channel for the
-//! runner to write, so the port is only ever written from one place.
+//! bytes in here. Input goes the other way, queued on the inject channel for
+//! the runner to write, so the port is only ever written from one place.
 
 use std::{
     sync::{
@@ -52,7 +52,10 @@ pub enum Origin {
 #[derive(Clone)]
 pub enum ConsoleEvent {
     Rx(Vec<u8>),
-    Echo { origin: Origin, text: String },
+    Echo {
+        origin: Origin,
+        text:   String,
+    },
     System(String),
     /// The port came or went. A viewer reads the new state off the console, so
     /// this only says that it changed.
@@ -258,10 +261,7 @@ impl Console {
         let ring = self.ring.lock().unwrap();
         let start = cursor.unwrap_or(ring.base());
         let (abs, hay) = ring.slice_from(start);
-        (
-            String::from_utf8_lossy(hay).into_owned(),
-            abs + hay.len() as u64,
-        )
+        (String::from_utf8_lossy(hay).into_owned(), abs + hay.len() as u64)
     }
 
     pub fn snapshot(&self, lines: usize) -> String {
@@ -338,12 +338,7 @@ impl Console {
         self.inject_and_wait_as(bytes, echo, Origin::Agent).await
     }
 
-    async fn inject_and_wait_as(
-        &self,
-        bytes: Vec<u8>,
-        echo: String,
-        origin: Origin,
-    ) -> Result<(), String> {
+    async fn inject_and_wait_as(&self, bytes: Vec<u8>, echo: String, origin: Origin) -> Result<(), String> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.inject
             .send(Inject {
@@ -360,9 +355,10 @@ impl Console {
     }
 
     /// Wait until `pattern` appears in received data, or `timeout_ms` elapses.
-    /// Scans from `cursor` if given, else from the current end for new data only.
-    /// Returns the text from the start point up to and including the match, or
-    /// up to the end on timeout, plus the cursor to continue from.
+    /// Scans from `cursor` if given, else from the current end for new data
+    /// only. Returns the text from the start point up to and including the
+    /// match, or up to the end on timeout, plus the cursor to continue
+    /// from.
     ///
     /// # Errors
     /// Returns an error if `pattern` is not a valid regular expression.

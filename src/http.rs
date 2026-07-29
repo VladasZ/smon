@@ -1,8 +1,8 @@
 //! The one-shot HTTP side door that sits next to /mcp.
 //!
 //! POST /call/<tool> with the JSON arguments as the body, an empty body meaning
-//! no arguments. Same tools as MCP without the session handshake, so `smon call`
-//! and curl stay one-liners.
+//! no arguments. Same tools as MCP without the session handshake, so `smon
+//! call` and curl stay one-liners.
 
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ use crate::{
     console::Console,
     control::Control,
     mcp::{
-        AdoptReq, Cursor, ExpectReq, ExpectResult, ReadReq, ReadResult, RollReq, SendCtrlReq,
-        SendReq, SnapshotReq, Which, log_result, status_of,
+        AdoptReq, Cursor, ExpectReq, ExpectResult, ReadReq, ReadResult, RollReq, SendCtrlReq, SendReq,
+        SnapshotReq, Which, log_result, status_of,
     },
     registry::Registry,
 };
@@ -32,7 +32,11 @@ pub async fn call_http(
     State(control): State<Arc<Control>>,
     body: String,
 ) -> Result<HttpJson<Value>, CallError> {
-    let args = if body.trim().is_empty() { "{}" } else { body.as_str() };
+    let args = if body.trim().is_empty() {
+        "{}"
+    } else {
+        body.as_str()
+    };
     match tool.as_str() {
         "console_list" => {
             let all: Vec<_> = registry.all().iter().map(status_of).collect();
@@ -145,9 +149,7 @@ fn parse_args<T: DeserializeOwned>(args: &str) -> Result<T, CallError> {
 }
 
 fn respond<T: Serialize>(value: T) -> Result<HttpJson<Value>, CallError> {
-    serde_json::to_value(value)
-        .map(HttpJson)
-        .map_err(|e| internal(e.to_string()))
+    serde_json::to_value(value).map(HttpJson).map_err(|e| internal(e.to_string()))
 }
 
 #[cfg(test)]
@@ -158,7 +160,6 @@ mod tests {
         thread::sleep,
         time::{Duration, Instant},
     };
-
 
     use crate::{
         client::call,
@@ -212,8 +213,7 @@ mod tests {
 
         // Answered before standing down, so the caller learns which process it
         // just stopped rather than losing the reply to the shutdown.
-        let told: Info =
-            serde_json::from_str(&call(addr, "smon_restart", "{}").unwrap()).unwrap();
+        let told: Info = serde_json::from_str(&call(addr, "smon_restart", "{}").unwrap()).unwrap();
         assert_eq!(told.pid, info.pid);
         assert!(control.stopping());
 

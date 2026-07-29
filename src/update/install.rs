@@ -19,13 +19,12 @@ pub const BINARY: &str = if cfg!(windows) { "smon.exe" } else { "smon" };
 /// binary came from somewhere this cannot safely replace.
 ///
 /// # Errors
-/// Returns an error if the home directory or the cargo bin directory is missing.
+/// Returns an error if the home directory or the cargo bin directory is
+/// missing.
 pub fn cargo_home() -> Result<PathBuf> {
     let home = match var_os("CARGO_HOME") {
         Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => home_dir()
-            .context("could not find the home directory")?
-            .join(".cargo"),
+        _ => home_dir().context("could not find the home directory")?.join(".cargo"),
     };
     let bin = home.join("bin");
     if !bin.is_dir() {
@@ -69,10 +68,7 @@ pub fn verify(binary: &Path, tag: &str) -> Result<()> {
         .output()
         .with_context(|| format!("the downloaded binary at {} did not run", binary.display()))?;
     if !output.status.success() {
-        bail!(
-            "the downloaded binary exited with {} on --version",
-            output.status
-        );
+        bail!("the downloaded binary exited with {} on --version", output.status);
     }
     let reported = String::from_utf8_lossy(&output.stdout);
     let expected = format!("smon {}", tag.strip_prefix('v').unwrap_or(tag));

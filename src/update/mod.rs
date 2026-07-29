@@ -16,15 +16,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-
 use asset::{Asset, download, download_url, extract, fetch_text, verify_checksum};
 use install::{
     BINARY, cargo_home, cleanup_stale_binaries, move_aside, restore, swap, verify, warn_if_shadowed,
 };
 use records::{install_key, record};
-use release::{
-    INSTALLED, PACKAGE, Release, exact, fetch_tags, format_version, installed_version, newest,
-};
+use release::{INSTALLED, PACKAGE, Release, exact, fetch_tags, format_version, installed_version, newest};
 
 #[derive(Debug, Default)]
 pub struct Request {
@@ -100,11 +97,7 @@ fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -
     verify_checksum(&sums, &asset.name, &archive)?;
 
     // Staged next to the target so the swap is a rename inside one filesystem.
-    let staged = target.with_file_name(if cfg!(windows) {
-        "smon.new.exe"
-    } else {
-        "smon.new"
-    });
+    let staged = target.with_file_name(if cfg!(windows) { "smon.new.exe" } else { "smon.new" });
     extract(&archive, asset.format, &staged)?;
 
     if let Err(error) = verify(&staged, &release.tag) {
@@ -114,9 +107,7 @@ fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -
     swap(&staged, target)?;
 
     if let Err(error) = record(home, &install_key(&release.tag), asset.target) {
-        eprintln!(
-            "warning: smon is installed but cargo's install list was not updated: {error:#}"
-        );
+        eprintln!("warning: smon is installed but cargo's install list was not updated: {error:#}");
     }
     Ok(())
 }
@@ -134,10 +125,7 @@ fn install_from_source(tag: &str, target: &Path) -> Result<()> {
         if target.exists() {
             Ok(())
         } else {
-            bail!(
-                "cargo reported success but did not install {}",
-                target.display()
-            )
+            bail!("cargo reported success but did not install {}", target.display())
         }
     });
 
@@ -151,9 +139,7 @@ fn install_from_source(tag: &str, target: &Path) -> Result<()> {
         }
         Err(error) => {
             if let Err(restore_error) = restore(&old, target) {
-                bail!(
-                    "{error:#}; restoring the previous smon binary also failed: {restore_error:#}"
-                );
+                bail!("{error:#}; restoring the previous smon binary also failed: {restore_error:#}");
             }
             Err(error)
         }

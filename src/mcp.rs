@@ -1,9 +1,9 @@
 //! The MCP side of smon: a Streamable HTTP server exposing the serial tools
 //! over the consoles a daemon owns.
 //!
-//! Every tool takes an optional `console`. With one console open the name can be
-//! left out, and with several it is required, because picking a board for the
-//! caller is not something this may guess at.
+//! Every tool takes an optional `console`. With one console open the name can
+//! be left out, and with several it is required, because picking a board for
+//! the caller is not something this may guess at.
 
 use std::{
     io::ErrorKind,
@@ -23,8 +23,7 @@ use rmcp::{
     handler::server::wrapper::{Json, Parameters},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
-        tower::StreamableHttpServerConfig,
+        StreamableHttpService, session::local::LocalSessionManager, tower::StreamableHttpServerConfig,
     },
 };
 use schemars::JsonSchema;
@@ -39,8 +38,9 @@ use crate::{
     registry::{Adopt, Registry},
 };
 
-/// The consoles a request can reach, and the process serving them. Handlers take
-/// whichever half they need, so the ones that only touch consoles are unchanged.
+/// The consoles a request can reach, and the process serving them. Handlers
+/// take whichever half they need, so the ones that only touch consoles are
+/// unchanged.
 #[derive(Clone)]
 pub struct AppState {
     pub registry: Arc<Registry>,
@@ -118,7 +118,8 @@ pub(crate) struct ReadReq {
     /// Console label or device path. Optional when only one console is open.
     #[serde(default)]
     pub console: Option<String>,
-    /// Return output received after this cursor. Omit for the whole retained buffer.
+    /// Return output received after this cursor. Omit for the whole retained
+    /// buffer.
     #[serde(default)]
     pub cursor:  Option<u64>,
 }
@@ -191,7 +192,8 @@ impl From<AdoptReq> for Adopt {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct Cursor {
-    /// Cursor just before the write. Read or expect from here to capture the reply.
+    /// Cursor just before the write. Read or expect from here to capture the
+    /// reply.
     pub cursor: u64,
 }
 
@@ -207,7 +209,8 @@ pub(crate) struct ReadResult {
 pub(crate) struct ExpectResult {
     /// Whether the pattern was found before the timeout.
     pub matched:   bool,
-    /// Output from the start point up to the match, or up to the end on timeout.
+    /// Output from the start point up to the match, or up to the end on
+    /// timeout.
     pub data:      String,
     /// Cursor at the end of `data`.
     pub cursor:    u64,
@@ -270,9 +273,7 @@ struct Server {
 
 impl Server {
     fn console(&self, name: Option<&str>) -> Result<Arc<Console>, McpError> {
-        self.registry
-            .resolve(name)
-            .map_err(|e| McpError::invalid_params(e, None))
+        self.registry.resolve(name).map_err(|e| McpError::invalid_params(e, None))
     }
 }
 
@@ -284,10 +285,7 @@ impl Server {
     }
 
     #[tool(description = "Write text to a serial console. Returns a cursor to read the reply from.")]
-    async fn serial_send(
-        &self,
-        Parameters(req): Parameters<SendReq>,
-    ) -> Result<Json<Cursor>, McpError> {
+    async fn serial_send(&self, Parameters(req): Parameters<SendReq>) -> Result<Json<Cursor>, McpError> {
         let cursor = self
             .console(req.console.as_deref())?
             .send(req.text, req.newline)
@@ -315,16 +313,14 @@ impl Server {
     }
 
     #[tool(description = "Read serial output received since a cursor. Omit cursor for the whole buffer.")]
-    async fn serial_read(
-        &self,
-        Parameters(req): Parameters<ReadReq>,
-    ) -> Result<Json<ReadResult>, McpError> {
+    async fn serial_read(&self, Parameters(req): Parameters<ReadReq>) -> Result<Json<ReadResult>, McpError> {
         let (data, cursor) = self.console(req.console.as_deref())?.read(req.cursor);
         Ok(Json(ReadResult { data, cursor }))
     }
 
     #[tool(
-        description = "Wait until a pattern appears in serial output, or until timeout. Substring by default, regex optional."
+        description = "Wait until a pattern appears in serial output, or until timeout. Substring by \
+                       default, regex optional."
     )]
     async fn serial_expect(
         &self,
@@ -344,10 +340,7 @@ impl Server {
     }
 
     #[tool(description = "Return the last N lines currently in a console's buffer.")]
-    async fn serial_snapshot(
-        &self,
-        Parameters(req): Parameters<SnapshotReq>,
-    ) -> Result<String, McpError> {
+    async fn serial_snapshot(&self, Parameters(req): Parameters<SnapshotReq>) -> Result<String, McpError> {
         Ok(self.console(req.console.as_deref())?.snapshot(req.lines))
     }
 
@@ -360,12 +353,10 @@ impl Server {
     }
 
     #[tool(
-        description = "Start a new log file for a console and return its path. Call this at the start of a run so its output lands in a file of its own."
+        description = "Start a new log file for a console and return its path. Call this at the start of a \
+                       run so its output lands in a file of its own."
     )]
-    async fn log_roll(
-        &self,
-        Parameters(req): Parameters<RollReq>,
-    ) -> Result<Json<LogResult>, McpError> {
+    async fn log_roll(&self, Parameters(req): Parameters<RollReq>) -> Result<Json<LogResult>, McpError> {
         let info = self
             .console(req.console.as_deref())?
             .log_roll(req.tag.as_deref())
@@ -374,21 +365,20 @@ impl Server {
     }
 
     #[tool(
-        description = "Take over a serial device that is not open here yet and start logging it. The device must exist and be free."
+        description = "Take over a serial device that is not open here yet and start logging it. The device \
+                       must exist and be free."
     )]
     async fn console_adopt(
         &self,
         Parameters(req): Parameters<AdoptReq>,
     ) -> Result<Json<StatusResult>, McpError> {
-        let console = self
-            .registry
-            .adopt(req.into())
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        let console = self.registry.adopt(req.into()).map_err(|e| McpError::invalid_params(e, None))?;
         Ok(Json(status_of(&console)))
     }
 
     #[tool(
-        description = "Let go of a console's device so another program can open it. The console keeps its buffer and log. Call console_hold to take it back."
+        description = "Let go of a console's device so another program can open it. The console keeps its \
+                       buffer and log. Call console_hold to take it back."
     )]
     async fn console_release(
         &self,
@@ -405,20 +395,14 @@ impl Server {
     }
 
     #[tool(description = "Take a released console's device back and reopen it.")]
-    async fn console_hold(
-        &self,
-        Parameters(req): Parameters<Which>,
-    ) -> Result<Json<StatusResult>, McpError> {
+    async fn console_hold(&self, Parameters(req): Parameters<Which>) -> Result<Json<StatusResult>, McpError> {
         let console = self.console(req.console.as_deref())?;
         console.hold();
         Ok(Json(status_of(&console)))
     }
 
     #[tool(description = "Report the log file a console is writing to now, and when it was started.")]
-    async fn log_info(
-        &self,
-        Parameters(req): Parameters<Which>,
-    ) -> Result<Json<LogResult>, McpError> {
+    async fn log_info(&self, Parameters(req): Parameters<Which>) -> Result<Json<LogResult>, McpError> {
         let info = self.console(req.console.as_deref())?.log_info();
         Ok(Json(log_result(&info)))
     }
@@ -435,9 +419,7 @@ impl ServerHandler for Server {}
 pub fn run(bind: SocketAddr, registry: Arc<Registry>, control: Arc<Control>) -> Result<()> {
     let runtime = Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async move {
-        let listener = TcpListener::bind(bind)
-            .await
-            .map_err(|e| anyhow!("binding {bind}: {e}"))?;
+        let listener = TcpListener::bind(bind).await.map_err(|e| anyhow!("binding {bind}: {e}"))?;
         let addr = listener.local_addr().unwrap_or(bind);
         println!("smon: serving http://{addr}/mcp");
         // The daemon serves until the process ends, or until an update asks it
@@ -537,10 +519,7 @@ async fn serve(listener: TcpListener, state: AppState, shutdown: oneshot::Receiv
     // A stop signal, or the sender going away without sending one. Both end the
     // server, so the two cases are deliberately the same.
     let graceful = async move { shutdown.await.unwrap_or(()) };
-    match axum::serve(listener, app)
-        .with_graceful_shutdown(graceful)
-        .await
-    {
+    match axum::serve(listener, app).with_graceful_shutdown(graceful).await {
         Ok(()) => {}
         Err(e) => eprintln!("smon: http server stopped: {e}"),
     }

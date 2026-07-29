@@ -28,8 +28,8 @@ const RECONNECT_EVERY: Duration = Duration::from_secs(1);
 // How long the loop waits on the input queue before looking at everything else.
 // It bounds how late a disconnect is noticed, and input is never delayed by it.
 const TICK: Duration = Duration::from_millis(100);
-// A device asserting flow control stalls writes briefly, which is normal. Only a
-// stall this long with no progress at all means a dead port.
+// A device asserting flow control stalls writes briefly, which is normal. Only
+// a stall this long with no progress at all means a dead port.
 const WRITE_STALL_LIMIT: Duration = Duration::from_secs(5);
 
 /// `resp` reports the result to whoever queued the input. Keyboard writes have
@@ -65,11 +65,7 @@ impl Runner {
     /// # Errors
     /// Returns an error only when `require_open` is set and the port cannot be
     /// opened.
-    pub fn start(
-        console: Arc<Console>,
-        injects: Receiver<Inject>,
-        require_open: bool,
-    ) -> Result<Runner> {
+    pub fn start(console: Arc<Console>, injects: Receiver<Inject>, require_open: bool) -> Result<Runner> {
         let (deaths_tx, deaths_rx) = mpsc::channel::<String>();
         let mut conn = None;
         if require_open {
@@ -165,9 +161,9 @@ fn run(
     }
 }
 
-// While disconnected the input is dropped rather than piling up for a dead port.
-// A caller waiting on the result is told, and a keystroke gets a note in the
-// scrollback instead.
+// While disconnected the input is dropped rather than piling up for a dead
+// port. A caller waiting on the result is told, and a keystroke gets a note in
+// the scrollback instead.
 fn write(console: &Arc<Console>, conn: &Option<Connection>, inject: Inject) {
     let Inject {
         bytes,
@@ -206,23 +202,16 @@ fn connect(console: &Arc<Console>, deaths: &Sender<String>) -> Result<Connection
     // The probe lock is held across the open, so another instance's port probe
     // can't briefly grab the port at the same instant and make this open fail
     // with access-denied.
-    let opened = probe::hold(|| {
-        serialport::new(name, baud)
-            .timeout(Duration::from_millis(50))
-            .open()
-    });
+    let opened = probe::hold(|| serialport::new(name, baud).timeout(Duration::from_millis(50)).open());
     let port = opened.with_context(|| format!("opening {name} @ {baud}"))?;
-    let reader_port = port
-        .try_clone()
-        .context("cloning serial port for reader thread")?;
+    let reader_port = port.try_clone().context("cloning serial port for reader thread")?;
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (writer_tx, writer_rx) = mpsc::channel::<WriteReq>();
 
     let reader_console = Arc::clone(console);
     let reader_deaths = deaths.clone();
-    let reader =
-        thread::spawn(move || reader_loop(reader_port, &reader_console, &stop_rx, &reader_deaths));
+    let reader = thread::spawn(move || reader_loop(reader_port, &reader_console, &stop_rx, &reader_deaths));
 
     let writer_deaths = deaths.clone();
     let writer = thread::spawn(move || writer_loop(port, &writer_rx, &writer_deaths));
@@ -255,10 +244,7 @@ fn reader_loop(
 ) {
     let mut buf = [0u8; 4096];
     loop {
-        if matches!(
-            stop_rx.try_recv(),
-            Ok(()) | Err(mpsc::TryRecvError::Disconnected)
-        ) {
+        if matches!(stop_rx.try_recv(), Ok(()) | Err(mpsc::TryRecvError::Disconnected)) {
             return;
         }
         match port.read(&mut buf) {
@@ -275,11 +261,7 @@ fn reader_loop(
     }
 }
 
-fn writer_loop(
-    mut port: Box<dyn SerialPort>,
-    reqs: &Receiver<WriteReq>,
-    deaths: &Sender<String>,
-) {
+fn writer_loop(mut port: Box<dyn SerialPort>, reqs: &Receiver<WriteReq>, deaths: &Sender<String>) {
     while let Ok(req) = reqs.recv() {
         match write_with_retry(port.as_mut(), &req.bytes) {
             Ok(()) => {
@@ -301,8 +283,9 @@ fn report(deaths: &Sender<String>, reason: String) -> bool {
     deaths.send(reason).is_ok()
 }
 
-// Retry timed-out writes until the stall limit, resetting the clock whenever any
-// bytes go through, so slow trickling progress is not mistaken for a dead port.
+// Retry timed-out writes until the stall limit, resetting the clock whenever
+// any bytes go through, so slow trickling progress is not mistaken for a dead
+// port.
 fn write_with_retry(port: &mut dyn SerialPort, bytes: &[u8]) -> io::Result<()> {
     let mut written = 0;
     let mut deadline = Instant::now() + WRITE_STALL_LIMIT;

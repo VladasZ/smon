@@ -24,14 +24,11 @@ use ratatui::{
 pub struct Item {
     pub value: String,
     pub label: String,
-    pub busy: bool,
+    pub busy:  bool,
 }
 
 fn make_labels(items: &[Item]) -> Vec<Utf32String> {
-    items
-        .iter()
-        .map(|i| Utf32String::from(i.label.as_str()))
-        .collect()
+    items.iter().map(|i| Utf32String::from(i.label.as_str())).collect()
 }
 
 // Indices into the item list matching `query`, best fuzzy score first.
@@ -55,8 +52,8 @@ fn filter_items(labels: &[Utf32String], query: &str, matcher: &mut Matcher) -> V
     hits.into_iter().map(|(i, _)| i).collect()
 }
 
-// `source` is re-called every second so the list (and each port's busy state) stays current
-// while the picker is open.
+// `source` is re-called every second so the list (and each port's busy state)
+// stays current while the picker is open.
 pub fn pick(
     terminal: &mut DefaultTerminal,
     title: &str,
@@ -143,9 +140,7 @@ pub fn pick(
                 }
 
                 let input_area = chunks[1];
-                let input_block = Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(border);
+                let input_block = Block::bordered().border_type(BorderType::Rounded).border_style(border);
                 let input_inner = input_block.inner(input_area);
                 frame.render_widget(input_block, input_area);
 
@@ -186,7 +181,8 @@ pub fn pick(
                     if !item.busy {
                         return Ok(Some(item.value.clone()));
                     }
-                    // a busy port can't be opened, so selecting it does nothing.
+                    // a busy port can't be opened, so selecting it does
+                    // nothing.
                 } else if allow_free_text && !query.is_empty() {
                     return Ok(Some(query));
                 }

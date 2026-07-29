@@ -12,15 +12,8 @@ use ratatui::{
 
 use crate::ui::{OutLine, Source, Ui};
 
-pub fn draw<B: Backend>(
-    terminal: &mut Terminal<B>,
-    ui: &Ui,
-    title: &str,
-    connected: bool,
-) -> Result<()>
-where
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+pub fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &Ui, title: &str, connected: bool) -> Result<()>
+where B::Error: std::error::Error + Send + Sync + 'static {
     let border = Style::new().fg(Color::DarkGray);
     let title = if connected {
         format!(" {title} ")
@@ -45,9 +38,10 @@ where
 
         let height = out_inner.height as usize;
 
-        // Build and wrap only the newest lines that can reach the viewport. The view is always
-        // pinned to the bottom, so anything older can never show, and wrapping the whole capped
-        // history on every frame used to burn most of a core.
+        // Build and wrap only the newest lines that can reach the viewport. The view is
+        // always pinned to the bottom, so anything older can never show, and
+        // wrapping the whole capped history on every frame used to burn most of
+        // a core.
         let mut tail: Vec<Line> = Vec::new();
         let mut rows = 0usize;
         if !ui.rx_partial.is_empty() {
@@ -70,11 +64,12 @@ where
         let scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
         frame.render_widget(paragraph.scroll((scroll, 0)), out_inner);
 
-        // Lines left out of the tail wrap to at least one row each, which bounds the total row
-        // count from below without wrapping them, so the thumb size is approximate.
-        // content_length is the number of scroll positions, not the total row count. The thumb
-        // reaches the bottom only when position == content_length, and the bottom-pinned view
-        // is always at that maximum.
+        // Lines left out of the tail wrap to at least one row each, which bounds the
+        // total row count from below without wrapping them, so the thumb size
+        // is approximate. content_length is the number of scroll positions, not
+        // the total row count. The thumb reaches the bottom only when position
+        // == content_length, and the bottom-pinned view is always at that
+        // maximum.
         let total = ui.lines.len() + usize::from(!ui.rx_partial.is_empty());
         let total_rows = rows + (total - shown);
         if total_rows > height {
@@ -91,9 +86,7 @@ where
         }
 
         let in_area = chunks[1];
-        let in_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(border);
+        let in_block = Block::bordered().border_type(BorderType::Rounded).border_style(border);
         let in_inner = in_block.inner(in_area);
         frame.render_widget(in_block, in_area);
 
@@ -141,14 +134,13 @@ fn style_line(line: &OutLine) -> Line<'static> {
     Line::styled(text, style)
 }
 
-// Ask the paragraph itself how many rows the line wraps to at this width. A hand-rolled
-// ceil of chars over width drifts from the word-wrapper, which drops whitespace at wrap
-// boundaries, so on wide terminals it over-counts and the scroll overshoots the real
-// bottom, leaving the newest lines stranded at the top with blank space below.
+// Ask the paragraph itself how many rows the line wraps to at this width. A
+// hand-rolled ceil of chars over width drifts from the word-wrapper, which
+// drops whitespace at wrap boundaries, so on wide terminals it over-counts and
+// the scroll overshoots the real bottom, leaving the newest lines stranded at
+// the top with blank space below.
 fn wrapped_rows(line: &Line, width: u16) -> usize {
-    Paragraph::new(line.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width)
+    Paragraph::new(line.clone()).wrap(Wrap { trim: false }).line_count(width)
 }
 
 #[cfg(test)]
@@ -157,11 +149,12 @@ mod tests {
 
     use super::*;
 
-    // Two words of exactly the pane width, plus the space between them and a trailing one.
-    // The wrapper fits each word on its own row and drops the space at the break, so the line
-    // takes 2 rows while ceil(chars / width) counts the spaces and asks for 3. Feeding many
-    // of these used to make the naive row total overshoot the real wrapped height, so the
-    // scroll ran past the bottom and stranded the newest lines at the top of the pane.
+    // Two words of exactly the pane width, plus the space between them and a
+    // trailing one. The wrapper fits each word on its own row and drops the
+    // space at the break, so the line takes 2 rows while ceil(chars / width)
+    // counts the spaces and asks for 3. Feeding many of these used to make the
+    // naive row total overshoot the real wrapped height, so the scroll ran past
+    // the bottom and stranded the newest lines at the top of the pane.
     fn overcounting_line(inner: u16) -> String {
         format!("{} {} ", "a".repeat(inner as usize), "b".repeat(inner as usize))
     }
@@ -176,10 +169,11 @@ mod tests {
         assert_bottom_filled(230, 20);
     }
 
-    // Fill the pane with copies of an over-counting line and check the last text row is not
-    // blank. The precondition asserts the line really does over-count at this width, so the
-    // test can never silently pass on data that stopped triggering the bug, for example after
-    // a change in ratatui's wrapping.
+    // Fill the pane with copies of an over-counting line and check the last text
+    // row is not blank. The precondition asserts the line really does
+    // over-count at this width, so the test can never silently pass on data
+    // that stopped triggering the bug, for example after a change in ratatui's
+    // wrapping.
     fn assert_bottom_filled(width: u16, height: u16) {
         let inner = width - 2;
         let line = overcounting_line(inner);
@@ -200,12 +194,10 @@ mod tests {
         draw(&mut terminal, &ui, "COM11 @ 115200", true).unwrap();
         let buf = terminal.backend().buffer();
 
-        // The 3-row input box sits at the bottom, with the output box's bottom border just
-        // above it, so the last 0-indexed text row is height - 3 - 1 - 1.
+        // The 3-row input box sits at the bottom, with the output box's bottom border
+        // just above it, so the last 0-indexed text row is height - 3 - 1 - 1.
         let last_text_row = height - 3 - 1 - 1;
-        let row: String = (1..width - 1)
-            .map(|x| buf.cell((x, last_text_row)).unwrap().symbol())
-            .collect();
+        let row: String = (1..width - 1).map(|x| buf.cell((x, last_text_row)).unwrap().symbol()).collect();
         assert!(
             !row.trim().is_empty(),
             "bottom log row is blank at width {width} -- content over-scrolled off the top"

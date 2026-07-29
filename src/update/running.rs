@@ -2,8 +2,8 @@
 //! old binary.
 //!
 //! Replacing the file changes nothing for a process that is already up, so an
-//! update ends by telling each one to stand down. A daemon comes back on the new
-//! binary, a TUI simply goes.
+//! update ends by telling each one to stand down. A daemon comes back on the
+//! new binary, a TUI simply goes.
 
 use std::{
     io::{IsTerminal, Write, stdin, stdout},

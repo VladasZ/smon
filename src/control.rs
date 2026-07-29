@@ -52,7 +52,8 @@ pub struct Info {
     /// comes back on a binary the update did not touch.
     pub started:  u128,
     /// The binary this process runs. Captured at startup because reading it
-    /// later would name a deleted inode, an update having renamed the file away.
+    /// later would name a deleted inode, an update having renamed the file
+    /// away.
     pub exe:      Option<PathBuf>,
     pub consoles: usize,
 }
@@ -73,9 +74,7 @@ impl Control {
             role,
             exe: current_exe().ok(),
             args: args_os().skip(1).collect(),
-            started: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| since.as_nanos()),
+            started: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos()),
             asked: AtomicBool::new(false),
             release: Mutex::new(None),
         }
@@ -144,8 +143,7 @@ impl Control {
 fn replace(exe: &Path, args: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    Err(Command::new(exe).args(args).exec())
-        .with_context(|| format!("could not restart {}", exe.display()))
+    Err(Command::new(exe).args(args).exec()).with_context(|| format!("could not restart {}", exe.display()))
 }
 
 /// Windows has no exec, so the replacement is a fresh process and this one

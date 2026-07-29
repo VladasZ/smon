@@ -122,7 +122,11 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Cli> {
 
     let (command, rest) = words.split_first().map_or(("", &[][..]), |(c, r)| (c.as_str(), r));
     if command != "update" {
-        let named = if command.is_empty() { "the monitor" } else { command };
+        let named = if command.is_empty() {
+            "the monitor"
+        } else {
+            command
+        };
         deny_flag(flags.from_source, "--from-source", named)?;
         deny_flag(flags.yes, "--yes", named)?;
     }
@@ -169,9 +173,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Cli> {
         "call" => {
             deny(flags.eol.as_ref(), "--eol", "call")?;
             deny(flags.config.as_ref(), "--config", "call")?;
-            let (tool, rest) = rest
-                .split_first()
-                .context("usage: smon call <tool> [json-args]")?;
+            let (tool, rest) = rest.split_first().context("usage: smon call <tool> [json-args]")?;
             if rest.len() > 1 {
                 bail!("too many arguments for call");
             }
@@ -224,9 +226,8 @@ fn endpoint(text: Option<&str>) -> Result<SocketAddr> {
 }
 
 fn address(text: &str) -> Result<SocketAddr> {
-    text.parse().with_context(|| {
-        format!("invalid address '{text}', expected host:port like {DEFAULT_BIND}")
-    })
+    text.parse()
+        .with_context(|| format!("invalid address '{text}', expected host:port like {DEFAULT_BIND}"))
 }
 
 #[cfg(test)]
@@ -248,8 +249,7 @@ mod tests {
 
     #[test]
     fn eol_and_mcp_parse_in_both_forms() {
-        let Ok(Cli::Run { eol, mcp, .. }) = parse_args(&["--eol=cr", "--mcp", "127.0.0.1:9000"])
-        else {
+        let Ok(Cli::Run { eol, mcp, .. }) = parse_args(&["--eol=cr", "--mcp", "127.0.0.1:9000"]) else {
             panic!("expected Cli::Run");
         };
         assert_eq!(eol, b"\r");
@@ -299,8 +299,7 @@ mod tests {
 
     #[test]
     fn daemon_takes_a_config_and_an_optional_bind() {
-        let Ok(Cli::Daemon { config, mcp }) = parse_args(&["daemon", "--config", "/etc/x.toml"])
-        else {
+        let Ok(Cli::Daemon { config, mcp }) = parse_args(&["daemon", "--config", "/etc/x.toml"]) else {
             panic!("expected Cli::Daemon");
         };
         assert_eq!(config.as_deref(), Some("/etc/x.toml"));
@@ -346,8 +345,7 @@ mod tests {
         assert!(!request.from_source);
         assert!(!request.yes);
 
-        let Ok(Cli::Update { request, .. }) =
-            parse_args(&["update", "v0.1.2", "--from-source", "--yes"])
+        let Ok(Cli::Update { request, .. }) = parse_args(&["update", "v0.1.2", "--from-source", "--yes"])
         else {
             panic!("expected Cli::Update");
         };

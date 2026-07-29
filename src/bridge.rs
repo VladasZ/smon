@@ -17,7 +17,8 @@ use tokio::{
 use crate::console::{Console, ConsoleEvent};
 
 /// Accept connections forever, one console per port. Loopback only, for the
-/// same reason the rest of the endpoint is: a console is never put on a network.
+/// same reason the rest of the endpoint is: a console is never put on a
+/// network.
 pub async fn serve(console: Arc<Console>, port: u16) {
     let listener = match TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => listener,
@@ -26,10 +27,7 @@ pub async fn serve(console: Arc<Console>, port: u16) {
             return;
         }
     };
-    println!(
-        "smon: console {} bridged raw on 127.0.0.1:{port}",
-        console.name()
-    );
+    println!("smon: console {} bridged raw on 127.0.0.1:{port}", console.name());
     loop {
         match listener.accept().await {
             Ok((socket, _)) => {

@@ -44,12 +44,7 @@ impl ConsoleLog {
         Self::open_in(dir, name, retention_days, tag)
     }
 
-    pub fn open_in(
-        dir: PathBuf,
-        name: &str,
-        retention_days: i64,
-        tag: Option<&str>,
-    ) -> Result<ConsoleLog> {
+    pub fn open_in(dir: PathBuf, name: &str, retention_days: i64, tag: Option<&str>) -> Result<ConsoleLog> {
         fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
         let stem = sanitize(name);
         let started = Local::now();
@@ -125,16 +120,14 @@ impl ConsoleLog {
         }
         let cutoff = Local::now().date_naive() - chrono::Duration::days(self.retention);
         let prefix = format!("smon-{}-", self.stem);
-        let entries =
-            fs::read_dir(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
+        let entries = fs::read_dir(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
         for entry in entries {
             let path = entry?.path();
             let Some(date) = segment_date(&path, &prefix) else {
                 continue;
             };
             if date < cutoff {
-                fs::remove_file(&path)
-                    .with_context(|| format!("removing old log {}", path.display()))?;
+                fs::remove_file(&path).with_context(|| format!("removing old log {}", path.display()))?;
             }
         }
         Ok(())
@@ -188,9 +181,7 @@ pub fn log_dir() -> Option<PathBuf> {
     {
         return Some(local.join("smon").join("logs"));
     }
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())?;
+    let home = env::var_os("HOME").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())?;
     Some(home.join(".local").join("state").join("smon").join("logs"))
 }
 
@@ -221,9 +212,7 @@ fn escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             '\\' => out.push_str("\\\\"),
-            c if c.is_control() && (c as u32) < 0x100 => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
+            c if c.is_control() && (c as u32) < 0x100 => out.push_str(&format!("\\x{:02x}", c as u32)),
             c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
             c => out.push(c),
         }
@@ -275,7 +264,13 @@ mod tests {
         assert!(after.contains("after"));
         assert!(!after.contains("before"));
         assert!(
-            second.path.file_name().unwrap().to_str().unwrap().ends_with("-PCSWORK-17780.log"),
+            second
+                .path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with("-PCSWORK-17780.log"),
             "tag missing from {}",
             second.path.display()
         );
@@ -330,7 +325,10 @@ mod tests {
     fn segment_date_ignores_foreign_files() {
         let prefix = "smon-COM3-";
         assert_eq!(segment_date(Path::new("/logs/notes.txt"), prefix), None);
-        assert_eq!(segment_date(Path::new("/logs/smon-COM4-20260726-1.log"), prefix), None);
+        assert_eq!(
+            segment_date(Path::new("/logs/smon-COM4-20260726-1.log"), prefix),
+            None
+        );
     }
 
     #[test]

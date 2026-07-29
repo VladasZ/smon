@@ -114,12 +114,12 @@ fn attach(
     let (inject_tx, inject_rx) = channel();
     let console = Console::new(
         ConsoleSpec {
-            device:   device.to_string(),
-            label:    None,
+            device: device.to_string(),
+            label: None,
             baud,
-            eol:      eol.to_vec(),
+            eol: eol.to_vec(),
             ring_cap: DEFAULT_RING_CAP,
-            bridge:   None,
+            bridge: None,
         },
         log,
         inject_tx,
@@ -309,7 +309,11 @@ fn daemon_items(daemon: Option<&client::Daemon>) -> Vec<picker::Item> {
         .consoles
         .iter()
         .map(|console| {
-            let state = if console.connected { "connected" } else { "disconnected" };
+            let state = if console.connected {
+                "connected"
+            } else {
+                "disconnected"
+            };
             picker::Item {
                 value: format!("{CONSOLE_SENTINEL}{}", console.name),
                 label: format!("{}  (smon on {}, {state})", console.name, daemon.addr),
@@ -347,8 +351,8 @@ fn serial_port_items() -> Vec<picker::Item> {
     items
 }
 
-// Sort COM9 before COM10: split the trailing number off the name so it compares numerically
-// instead of lexically.
+// Sort COM9 before COM10: split the trailing number off the name so it compares
+// numerically instead of lexically.
 fn port_sort_key(name: &str) -> (String, Option<u64>) {
     let digits = name.chars().rev().take_while(char::is_ascii_digit).count();
     let (prefix, number) = name.split_at(name.len() - digits);

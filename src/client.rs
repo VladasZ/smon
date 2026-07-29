@@ -43,7 +43,11 @@ pub fn list(addr: SocketAddr) -> Result<()> {
     }
     for console in consoles {
         let label = console.label.as_deref().unwrap_or("-");
-        let state = if console.connected { "connected" } else { "disconnected" };
+        let state = if console.connected {
+            "connected"
+        } else {
+            "disconnected"
+        };
         println!("{label}  {}  {}  {state}", console.port, console.baud);
     }
     Ok(())
@@ -94,7 +98,8 @@ pub fn find_daemon(bind: SocketAddr) -> Option<Daemon> {
 fn request(mut stream: TcpStream, addr: SocketAddr, tool: &str, args: &str) -> Result<String> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let request = format!(
-        "POST /call/{tool} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{args}",
+        "POST /call/{tool} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: \
+         {}\r\nConnection: close\r\n\r\n{args}",
         args.len(),
     );
     stream.write_all(request.as_bytes())?;
@@ -119,9 +124,15 @@ mod tests {
         thread::sleep,
     };
 
-
     use super::*;
-    use crate::{console::{Console, ConsoleSpec}, control::{Control, Role}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
+    use crate::{
+        console::{Console, ConsoleSpec},
+        control::{Control, Role},
+        log::ConsoleLog,
+        mcp,
+        registry::Registry,
+        ring::DEFAULT_RING_CAP,
+    };
 
     #[test]
     fn call_roundtrip_via_http_side_door() {
@@ -146,7 +157,12 @@ mod tests {
 
         let (ready_tx, ready_rx) = mpsc::channel();
         let control = Arc::new(Control::new(Role::Tui));
-        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, Arc::clone(&control), ready_tx);
+        let server = mcp::spawn(
+            "127.0.0.1:0".parse().unwrap(),
+            registry,
+            Arc::clone(&control),
+            ready_tx,
+        );
 
         let addr = ready_rx.recv().unwrap().unwrap();
         let body = call(addr, "serial_status", "").unwrap();

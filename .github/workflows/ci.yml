@@ -12,6 +12,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The style in .rustfmt.toml uses options stable rustfmt rejects outright,
+      # so this needs nightly. rust-toolchain.toml still pins the build, which is
+      # why the check names its toolchain rather than relying on the default.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

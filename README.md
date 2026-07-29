@@ -232,6 +232,30 @@ Requires socat (`brew install socat` on macOS).
 
 On WSL2 the Windows COM ports are not directly visible. Forward the USB adapter into WSL with [usbipd-win](https://github.com/dorssel/usbipd-win) and smon will list attachable devices in the port picker and attach them for you. See [docs/wsl.md](docs/wsl.md) for the full setup.
 
+## Cutting a release
+
+```
+gh workflow run Release -R VladasZ/smon -f bump=patch
+```
+
+`bump` takes `patch`, `minor` or `major`. The workflow raises the version in
+`Cargo.toml`, commits it as `release vX.Y.Z`, tags and pushes, builds the binary
+for five targets, and publishes a GitHub release carrying those archives and a
+`SHA256SUMS` file. `smon update` reads exactly those assets, so a release is what
+makes the new version reachable.
+
+A green workflow is not the whole release. Publishing to crates.io is left out of
+CI on purpose, because the token belongs on your machine and not in a runner. So
+when the run finishes:
+
+```
+git pull --rebase
+cargo publish
+```
+
+Only after that does `cargo install smon` give people the new version. Skipping it
+leaves crates.io behind while the GitHub release looks finished.
+
 ## License
 
 Dual-licensed under MIT or Apache-2.0.

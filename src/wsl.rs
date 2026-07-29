@@ -17,9 +17,9 @@ enum State {
 }
 
 pub struct Device {
-    pub busid: String,
+    pub busid:   String,
     description: String,
-    state: State,
+    state:       State,
 }
 
 impl Device {
@@ -73,10 +73,7 @@ impl Usbipd {
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new(&self.exe)
-            .args(args)
-            .output()
-            .context("running usbipd")?;
+        let output = Command::new(&self.exe).args(args).output().context("running usbipd")?;
         if !output.status.success() {
             bail!("usbipd {args:?} failed");
         }
@@ -205,10 +202,7 @@ GUID                                  DEVICE
         let first = &devices[0];
         assert_eq!(first.busid, "1-1");
         assert_eq!(first.state, State::Shared);
-        assert_eq!(
-            first.description,
-            "Example USB Serial Converter A, Converter B"
-        );
+        assert_eq!(first.description, "Example USB Serial Converter A, Converter B");
 
         assert_eq!(devices[2].state, State::Shared); // "Shared (forced)"
         assert_eq!(devices[3].state, State::Attached);
@@ -237,9 +231,9 @@ GUID                                  DEVICE
     #[test]
     fn not_shared_label_points_to_bind() {
         let device = Device {
-            busid: "1-1".to_string(),
+            busid:       "1-1".to_string(),
             description: "USB Serial Converter A".to_string(),
-            state: State::NotShared,
+            state:       State::NotShared,
         };
         assert!(device.attach_label().contains("admin"));
     }

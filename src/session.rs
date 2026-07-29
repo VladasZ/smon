@@ -1,8 +1,8 @@
 //! The interactive session: keyboard in, console events out to the screen.
 //!
 //! The session owns no device. It watches a console and queues input on it, the
-//! same way an agent does, so what a person types and what a client injects both
-//! appear here in the order the port saw them.
+//! same way an agent does, so what a person types and what a client injects
+//! both appear here in the order the port saw them.
 
 use std::time::Duration;
 
@@ -21,11 +21,7 @@ use crate::{
 
 /// # Errors
 /// Returns an error if the screen cannot be drawn.
-pub fn run(
-    terminal: &mut DefaultTerminal,
-    attached: &mut dyn Attached,
-    control: &Control,
-) -> Result<()> {
+pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control: &Control) -> Result<()> {
     let mut config = Config::load();
     let mut ui = Ui {
         history: config.history.clone(),

@@ -156,10 +156,8 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
         if !is_binary(&path.to_string_lossy()) {
             continue;
         }
-        let mut file =
-            File::create(dest).with_context(|| format!("could not write {}", dest.display()))?;
-        copy(&mut entry, &mut file)
-            .with_context(|| format!("could not write {}", dest.display()))?;
+        let mut file = File::create(dest).with_context(|| format!("could not write {}", dest.display()))?;
+        copy(&mut entry, &mut file).with_context(|| format!("could not write {}", dest.display()))?;
         return Ok(());
     }
     bail!("the archive does not contain a {BINARY} binary")
@@ -168,16 +166,12 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
 fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).context("could not read the archive")?;
     for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .context("could not read an archive entry")?;
+        let mut entry = archive.by_index(index).context("could not read an archive entry")?;
         if !is_binary(entry.name()) {
             continue;
         }
-        let mut file =
-            File::create(dest).with_context(|| format!("could not write {}", dest.display()))?;
-        copy(&mut entry, &mut file)
-            .with_context(|| format!("could not write {}", dest.display()))?;
+        let mut file = File::create(dest).with_context(|| format!("could not write {}", dest.display()))?;
+        copy(&mut entry, &mut file).with_context(|| format!("could not write {}", dest.display()))?;
         return Ok(());
     }
     bail!("the archive does not contain a {BINARY} binary")

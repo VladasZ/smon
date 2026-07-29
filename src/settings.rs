@@ -24,17 +24,17 @@ pub struct Settings {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleSettings {
-    pub device:  String,
+    pub device:      String,
     /// A name for this console. smon gives it no meaning, it only makes the
     /// console addressable by something shorter than its device path.
     #[serde(default)]
-    pub label:   Option<String>,
+    pub label:       Option<String>,
     #[serde(default = "default_baud")]
-    pub baud:    u32,
+    pub baud:        u32,
     #[serde(default = "default_eol")]
-    pub eol:     String,
+    pub eol:         String,
     #[serde(default = "default_ring_kb")]
-    pub ring_kb: usize,
+    pub ring_kb:     usize,
     /// Offer this console as a raw byte stream on this loopback port, for a
     /// program that would otherwise need the device node itself.
     #[serde(default)]
@@ -73,8 +73,7 @@ impl Settings {
             Some(path) => PathBuf::from(path),
             None => Self::find()?,
         };
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("reading config {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("reading config {}", path.display()))?;
         let settings: Settings =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
         if settings.consoles.is_empty() {

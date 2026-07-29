@@ -19,7 +19,7 @@ pub struct Adopt {
 }
 
 pub struct Registry {
-    consoles: RwLock<Vec<Arc<Console>>>,
+    consoles:  RwLock<Vec<Arc<Console>>>,
     // Held for as long as the registry lives. A dropped runner would only
     // detach its thread, but keeping them makes the ownership honest.
     runners:   Mutex<Vec<Runner>>,
@@ -62,20 +62,19 @@ impl Registry {
         let (inject_tx, inject_rx) = channel();
         let console = Console::new(
             ConsoleSpec {
-                device:   wanted.device,
-                label:    wanted.label,
-                baud:     wanted.baud,
+                device: wanted.device,
+                label: wanted.label,
+                baud: wanted.baud,
                 eol,
                 ring_cap: wanted.ring_kb.saturating_mul(1024),
                 // A bridge listener is started with the server, so a console
                 // adopted later cannot have one. Put it in the config for that.
-                bridge:   None,
+                bridge: None,
             },
             log,
             inject_tx,
         );
-        let runner = Runner::start(Arc::clone(&console), inject_rx, true)
-            .map_err(|e| format!("{e:#}"))?;
+        let runner = Runner::start(Arc::clone(&console), inject_rx, true).map_err(|e| format!("{e:#}"))?;
 
         self.runners.lock().unwrap().push(runner);
         self.consoles.write().unwrap().push(Arc::clone(&console));
@@ -108,7 +107,10 @@ impl Registry {
             return Err(format!("no console '{query}', have {}", self.names()));
         };
         if found.next().is_some() {
-            return Err(format!("'{query}' matches more than one console of {}", self.names()));
+            return Err(format!(
+                "'{query}' matches more than one console of {}",
+                self.names()
+            ));
         }
         Ok(Arc::clone(first))
     }
@@ -184,10 +186,13 @@ mod tests {
     #[test]
     fn several_consoles_refuse_to_guess() {
         let logs = Logs::new("guess");
-        let registry = Registry::new(vec![
-            logs.console("/dev/ttyUSB0", Some("first")),
-            logs.console("/dev/ttyUSB2", Some("second")),
-        ], 0);
+        let registry = Registry::new(
+            vec![
+                logs.console("/dev/ttyUSB0", Some("first")),
+                logs.console("/dev/ttyUSB2", Some("second")),
+            ],
+            0,
+        );
         let error = registry.resolve(None).err().unwrap();
         assert!(error.contains("first"), "{error}");
         assert!(error.contains("second"), "{error}");
@@ -196,13 +201,22 @@ mod tests {
     #[test]
     fn a_console_answers_to_its_label_and_its_device() {
         let logs = Logs::new("address");
-        let registry = Registry::new(vec![
-            logs.console("/dev/ttyUSB0", Some("first")),
-            logs.console("/dev/ttyUSB2", Some("second")),
-        ], 0);
+        let registry = Registry::new(
+            vec![
+                logs.console("/dev/ttyUSB0", Some("first")),
+                logs.console("/dev/ttyUSB2", Some("second")),
+            ],
+            0,
+        );
         assert_eq!(registry.resolve(Some("second")).unwrap().device(), "/dev/ttyUSB2");
-        assert_eq!(registry.resolve(Some("/dev/ttyUSB0")).unwrap().device(), "/dev/ttyUSB0");
-        assert_eq!(registry.resolve(Some("ttyUSB2")).unwrap().device(), "/dev/ttyUSB2");
+        assert_eq!(
+            registry.resolve(Some("/dev/ttyUSB0")).unwrap().device(),
+            "/dev/ttyUSB0"
+        );
+        assert_eq!(
+            registry.resolve(Some("ttyUSB2")).unwrap().device(),
+            "/dev/ttyUSB2"
+        );
     }
 
     #[test]
@@ -261,10 +275,13 @@ mod tests {
     #[test]
     fn an_ambiguous_name_is_refused() {
         let logs = Logs::new("ambiguous");
-        let registry = Registry::new(vec![
-            logs.console("/dev/serial/by-path/a/ttyUSB0", Some("first")),
-            logs.console("/dev/serial/by-path/b/ttyUSB0", Some("second")),
-        ], 0);
+        let registry = Registry::new(
+            vec![
+                logs.console("/dev/serial/by-path/a/ttyUSB0", Some("first")),
+                logs.console("/dev/serial/by-path/b/ttyUSB0", Some("second")),
+            ],
+            0,
+        );
         let error = registry.resolve(Some("ttyUSB0")).err().unwrap();
         assert!(error.contains("more than one"), "{error}");
     }

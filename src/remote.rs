@@ -59,13 +59,7 @@ pub fn attach(addr: &str, console: &str) -> Result<Remote> {
                 return;
             }
         };
-        runtime.block_on(drive(
-            url,
-            &events_tx,
-            &hello_tx,
-            outgoing_rx,
-            &thread_connected,
-        ));
+        runtime.block_on(drive(url, &events_tx, &hello_tx, outgoing_rx, &thread_connected));
     });
 
     match hello_rx.recv_timeout(HELLO_WAIT) {
@@ -214,9 +208,7 @@ impl Attached for Remote {
 
 impl Remote {
     fn queue(&self, frame: ToConsole) -> Result<(), String> {
-        self.outgoing
-            .send(frame)
-            .map_err(|_| "not attached any more".to_string())
+        self.outgoing.send(frame).map_err(|_| "not attached any more".to_string())
     }
 }
 
@@ -224,9 +216,15 @@ impl Remote {
 mod tests {
     use std::{env, fs, sync::mpsc, thread::sleep};
 
-
     use super::*;
-    use crate::{console::{Console, ConsoleSpec}, control::{Control, Role}, log::ConsoleLog, mcp, registry::Registry, ring::DEFAULT_RING_CAP};
+    use crate::{
+        console::{Console, ConsoleSpec},
+        control::{Control, Role},
+        log::ConsoleLog,
+        mcp,
+        registry::Registry,
+        ring::DEFAULT_RING_CAP,
+    };
 
     // Both directions over a real socket against a real server. The console
     // here has no device, so the input it receives is read straight off the
@@ -258,7 +256,12 @@ mod tests {
         let (ready_tx, ready_rx) = mpsc::channel();
         let registry = Registry::new(vec![Arc::clone(&console)], 0);
         let control = Arc::new(Control::new(Role::Tui));
-        let server = mcp::spawn("127.0.0.1:0".parse().unwrap(), registry, Arc::clone(&control), ready_tx);
+        let server = mcp::spawn(
+            "127.0.0.1:0".parse().unwrap(),
+            registry,
+            Arc::clone(&control),
+            ready_tx,
+        );
         let addr = ready_rx.recv().unwrap().unwrap();
 
         let mut viewer = attach(&addr.to_string(), "under-test").unwrap();

@@ -8,13 +8,14 @@ const MAX_HISTORY: usize = 200;
 #[derive(Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub baud: HashMap<String, u32>,
+    pub baud:    HashMap<String, u32>,
     #[serde(default)]
     pub history: Vec<String>,
 }
 
 impl Config {
-    // Most-recent last. Re-sending a command moves it to the end so it ranks as the freshest.
+    // Most-recent last. Re-sending a command moves it to the end so it ranks as the
+    // freshest.
     pub fn record_command(&mut self, cmd: &str) {
         if cmd.is_empty() {
             return;
@@ -76,9 +77,7 @@ pub fn config_dir() -> Option<PathBuf> {
         return Some(xdg);
     }
     if cfg!(windows)
-        && let Some(appdata) = env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
+        && let Some(appdata) = env::var_os("APPDATA").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
     {
         return Some(appdata);
     }

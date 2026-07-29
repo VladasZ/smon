@@ -1,12 +1,14 @@
 //! Detecting whether a serial port is already in use.
 //!
-//! A COM port allows only one open at a time, so opening it tells us if someone else holds it.
-//! We open with zero desired access, which performs that check without initialising the UART, so
-//! it never toggles DTR/RTS and never resets the attached device.
+//! A COM port allows only one open at a time, so opening it tells us if someone
+//! else holds it. We open with zero desired access, which performs that check
+//! without initialising the UART, so it never toggles DTR/RTS and never resets
+//! the attached device.
 //!
-//! Two smon instances polling at the same instant would each briefly hold the port and so report
-//! the other as busy. [`Lock`] is a cross-process named mutex that serialises the probe pass, so
-//! only one instance probes at a time and they never see each other.
+//! Two smon instances polling at the same instant would each briefly hold the
+//! port and so report the other as busy. [`Lock`] is a cross-process named
+//! mutex that serialises the probe pass, so only one instance probes at a time
+//! and they never see each other.
 
 #[cfg(windows)]
 mod imp {
@@ -29,8 +31,7 @@ mod imp {
         ) -> *mut c_void;
         fn CloseHandle(handle: *mut c_void) -> i32;
         fn GetLastError() -> u32;
-        fn CreateMutexW(security: *mut c_void, initial_owner: i32, name: *const u16)
-        -> *mut c_void;
+        fn CreateMutexW(security: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
         fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
         fn ReleaseMutex(handle: *mut c_void) -> i32;
     }
@@ -41,7 +42,7 @@ mod imp {
 
     pub struct Lock {
         handle: *mut c_void,
-        owned: bool,
+        owned:  bool,
     }
 
     impl Lock {

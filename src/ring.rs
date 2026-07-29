@@ -18,9 +18,9 @@ pub struct Ring {
 impl Ring {
     pub fn new(cap: usize) -> Self {
         Self {
-            buf: Vec::new(),
+            buf:  Vec::new(),
             base: 0,
-            cap: cap.max(1),
+            cap:  cap.max(1),
         }
     }
 
@@ -90,9 +90,7 @@ pub enum Matcher {
 impl Matcher {
     pub fn build(pattern: &str, regex: bool) -> Result<Self, String> {
         if regex {
-            regex::bytes::Regex::new(pattern)
-                .map(Matcher::Regex)
-                .map_err(|e| e.to_string())
+            regex::bytes::Regex::new(pattern).map(Matcher::Regex).map_err(|e| e.to_string())
         } else {
             Ok(Matcher::Substr(pattern.as_bytes().to_vec()))
         }

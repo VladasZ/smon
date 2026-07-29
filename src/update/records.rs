@@ -73,8 +73,7 @@ fn patch_crates_toml(path: &Path, key: &str) -> Result<()> {
 
 fn patch_crates2_json(path: &Path, key: &str, target: &str, rustc: Option<&str>) -> Result<()> {
     let mut doc: Value = if path.exists() {
-        let text =
-            read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
+        let text = read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
         from_str(&text).with_context(|| format!("could not parse {}", path.display()))?
     } else {
         json!({ "installs": {}, "v": 1 })
@@ -121,9 +120,7 @@ fn patch_crates2_json(path: &Path, key: &str, target: &str, rustc: Option<&str>)
 }
 
 fn stale_keys<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<String> {
-    keys.filter(|key| package_of(key) == PACKAGE)
-        .map(str::to_string)
-        .collect()
+    keys.filter(|key| package_of(key) == PACKAGE).map(str::to_string).collect()
 }
 
 /// The toolchain that built the asset is unknowable, so the local one is
@@ -135,10 +132,7 @@ fn rustc_info() -> Option<(String, String)> {
         return None;
     }
     let text = String::from_utf8(output.stdout).ok()?;
-    let host = text
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))?
-        .to_string();
+    let host = text.lines().find_map(|line| line.strip_prefix("host: "))?.to_string();
     Some((text, host))
 }
 

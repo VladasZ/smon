@@ -2,8 +2,8 @@
 //!
 //! A daemon binds loopback only, so a console is never exposed to the network.
 //! To attach from elsewhere the client forwards a local port over ssh and talks
-//! to that, which means it inherits whatever already guards ssh to that host and
-//! opens nothing new.
+//! to that, which means it inherits whatever already guards ssh to that host
+//! and opens nothing new.
 
 use std::{
     net::{SocketAddr, TcpListener, TcpStream},
@@ -40,7 +40,8 @@ impl Drop for Tunnel {
     }
 }
 
-/// Forward a local port to `remote` on `host` over ssh and wait for it to answer.
+/// Forward a local port to `remote` on `host` over ssh and wait for it to
+/// answer.
 ///
 /// # Errors
 /// Returns an error if ssh cannot start, or the forwarded port does not accept
