@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::DefaultTerminal;
 
 use crate::{
@@ -57,7 +57,7 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
         // Redraw only when state changed. An unconditional draw on every 16ms
         // tick re-wrapped the scrollback at 60 fps and burned most of a core.
         if dirty {
-            draw(terminal, &ui, &title, attached.connected())?;
+            draw(terminal, &mut ui, &title, attached.connected())?;
             dirty = false;
         }
 
@@ -66,6 +66,15 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
         }
         let key = match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => ui.scroll_up(WHEEL_LINES),
+                    MouseEventKind::ScrollDown => ui.scroll_down(WHEEL_LINES),
+                    _ => continue,
+                }
+                dirty = true;
+                continue;
+            }
             // a resize invalidates the frame even though no state changed.
             Event::Resize(_, _) => {
                 dirty = true;
@@ -119,6 +128,8 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
 }
 
 const POLL: Duration = Duration::from_millis(16);
+// One wheel notch moves this many lines, matching common terminal behavior.
+const WHEEL_LINES: usize = 3;
 
 fn is_quit(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)

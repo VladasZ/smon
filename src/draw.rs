@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::ui::{OutLine, Source, Ui};
 
-pub fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &Ui, title: &str, connected: bool) -> Result<()>
+pub fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui, title: &str, connected: bool) -> Result<()>
 where B::Error: std::error::Error + Send + Sync + 'static {
     let border = Style::new().fg(Color::DarkGray);
     let title = if connected {
@@ -38,18 +38,19 @@ where B::Error: std::error::Error + Send + Sync + 'static {
 
         let height = out_inner.height as usize;
 
-        // Build and wrap only the newest lines that can reach the viewport. The view is
-        // always pinned to the bottom, so anything older can never show, and
-        // wrapping the whole capped history on every frame used to burn most of
-        // a core.
+        // Build and wrap only the lines that can reach the viewport. The view
+        // sits ui.scroll lines above the live bottom, so nothing outside that
+        // window can show, and wrapping the whole capped history on every frame
+        // used to burn most of a core.
+        let mut scroll = ui.scroll.min(ui.lines.len().saturating_sub(1));
         let mut tail: Vec<Line> = Vec::new();
         let mut rows = 0usize;
-        if !ui.rx_partial.is_empty() {
+        if scroll == 0 && !ui.rx_partial.is_empty() {
             let line = Line::from(ui.rx_partial.clone());
             rows += wrapped_rows(&line, out_inner.width);
             tail.push(line);
         }
-        for line in ui.lines.iter().rev() {
+        for line in ui.lines.iter().rev().skip(scroll) {
             if rows >= height {
                 break;
             }
@@ -57,25 +58,41 @@ where B::Error: std::error::Error + Send + Sync + 'static {
             rows += wrapped_rows(&styled, out_inner.width);
             tail.push(styled);
         }
+        // Scrolled past the top: pull lines back in from below the window until
+        // the pane is full again, so the view stops at the oldest full screen
+        // instead of draining off the top.
+        while rows < height && scroll > 0 {
+            scroll -= 1;
+            let styled = style_line(&ui.lines[ui.lines.len() - 1 - scroll]);
+            rows += wrapped_rows(&styled, out_inner.width);
+            tail.insert(0, styled);
+            if scroll == 0 && rows < height && !ui.rx_partial.is_empty() {
+                let line = Line::from(ui.rx_partial.clone());
+                rows += wrapped_rows(&line, out_inner.width);
+                tail.insert(0, line);
+            }
+        }
+        ui.scroll = scroll;
         let shown = tail.len();
         tail.reverse();
 
         let paragraph = Paragraph::new(Text::from(tail)).wrap(Wrap { trim: false });
-        let scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
-        frame.render_widget(paragraph.scroll((scroll, 0)), out_inner);
+        let para_scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
+        frame.render_widget(paragraph.scroll((para_scroll, 0)), out_inner);
 
         // Lines left out of the tail wrap to at least one row each, which bounds the
         // total row count from below without wrapping them, so the thumb size
-        // is approximate. content_length is the number of scroll positions, not
-        // the total row count. The thumb reaches the bottom only when position
-        // == content_length, and the bottom-pinned view is always at that
-        // maximum.
+        // and position are approximate. content_length is the number of scroll
+        // positions, not the total row count. The thumb reaches the bottom only
+        // when position == content_length, which is where the bottom-pinned
+        // view sits.
         let total = ui.lines.len() + usize::from(!ui.rx_partial.is_empty());
         let total_rows = rows + (total - shown);
         if total_rows > height {
+            let below = scroll + usize::from(scroll > 0 && !ui.rx_partial.is_empty());
             let mut sb_state = ScrollbarState::new(total_rows - height)
                 .viewport_content_length(height)
-                .position(total_rows - height);
+                .position((total_rows - height).saturating_sub(below));
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
@@ -191,7 +208,7 @@ mod tests {
         }
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        draw(&mut terminal, &ui, "COM11 @ 115200", true).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
         let buf = terminal.backend().buffer();
 
         // The 3-row input box sits at the bottom, with the output box's bottom border
@@ -202,5 +219,54 @@ mod tests {
             !row.trim().is_empty(),
             "bottom log row is blank at width {width} -- content over-scrolled off the top"
         );
+    }
+
+    fn text_row(terminal: &Terminal<TestBackend>, width: u16, y: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (1..width - 1).map(|x| buf.cell((x, y)).unwrap().symbol()).collect()
+    }
+
+    fn numbered_ui(count: usize) -> Ui {
+        let mut ui = Ui::default();
+        for i in 0..count {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui
+    }
+
+    #[test]
+    fn scrolled_view_shows_older_lines_at_the_bottom() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(40);
+        ui.scroll = 10;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        let last_text_row = height - 3 - 1 - 1;
+        let row = text_row(&terminal, width, last_text_row);
+        assert!(
+            row.contains("line 29"),
+            "expected line 29 at the bottom, got: {row}"
+        );
+        assert_eq!(ui.scroll, 10);
+    }
+
+    // Scrolling far past the top must stop at the oldest full screen, not leave
+    // the pane mostly blank, and the offset must be pinned there so scrolling
+    // back down starts moving immediately.
+    #[test]
+    fn over_scroll_clamps_to_the_oldest_full_screen() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(40);
+        ui.scroll = 1000;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        let top = text_row(&terminal, width, 1);
+        assert!(top.contains("line 0"), "expected line 0 at the top, got: {top}");
+        let pane_rows = usize::from(height) - 3 - 2;
+        assert_eq!(ui.scroll, 40 - pane_rows);
     }
 }

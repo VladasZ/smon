@@ -53,9 +53,22 @@ pane in cyan with a `>` prefix.
 
 - Enter sends the current line plus the line ending.
 - Up and Down recall previously sent commands.
+- The mouse wheel scrolls the output history, three lines per notch.
 - Tab, or Right at the end of the line, accepts the ghost autocomplete suggestion.
 - Ctrl key combos such as Ctrl+C pass straight through to the device.
 - Ctrl+Q quits.
+
+### Scrolling
+
+The wheel scrolls the output pane. While you are scrolled up the view stays on
+what you are reading, new output does not drag it away. Scrolling up stops at
+the oldest full screen, and the scrollbar shows where you are. Scrolling back
+down to the bottom pins the view to live output again, and sending a command
+with Enter snaps it there too.
+
+smon captures the mouse to receive wheel events, which also means the terminal's
+own text selection needs its usual override while smon runs, holding Shift while
+dragging in most terminals. Text selection without Shift is on the roadmap.
 
 If the device disappears mid-session, for example it reboots or the adapter is
 replugged, smon keeps the scrollback, marks the session as

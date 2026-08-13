@@ -5,6 +5,7 @@
 //! screen to the session.
 
 use std::{
+    io::stdout,
     net::SocketAddr,
     sync::{Arc, mpsc::channel},
     thread,
@@ -12,6 +13,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute,
+};
 use ratatui::DefaultTerminal;
 use serde::Serialize;
 use serialport::{SerialPortType, available_ports};
@@ -54,12 +59,19 @@ pub fn run(eol: Vec<u8>, mcp_bind: SocketAddr, remote: bool) -> Result<()> {
     }
     let control = Arc::new(Control::new(Role::Tui));
     let mut terminal = ratatui::init();
-    let result = pick_and_attach(&mut terminal, &eol, mcp_bind, daemon.as_ref(), remote, &control);
+    // Without capture the terminal turns the wheel into arrow keys, which land
+    // in command history instead of the scrollback.
+    let result = execute!(stdout(), EnableMouseCapture)
+        .context("enabling mouse capture")
+        .and_then(|()| pick_and_attach(&mut terminal, &eol, mcp_bind, daemon.as_ref(), remote, &control));
+    // Released before restore, while the alternate screen is still up, so the
+    // terminal is back to normal by the time the shell prompt returns.
+    let released = execute!(stdout(), DisableMouseCapture).context("releasing mouse capture");
     ratatui::restore();
     if control.stopping() {
         println!("smon: stopped by an update, start it again to use the new version");
     }
-    result
+    result.and(released)
 }
 
 fn pick_and_attach(

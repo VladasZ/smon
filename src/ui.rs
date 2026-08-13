@@ -43,6 +43,9 @@ pub struct Ui {
     pub history:    Vec<String>,
     pub hist_pos:   Option<usize>,
     pub suggestion: Option<String>,
+    /// Complete lines between the bottom of the view and the newest line. Zero
+    /// means pinned to the live bottom.
+    pub scroll:     usize,
 }
 
 impl Ui {
@@ -61,10 +64,20 @@ impl Ui {
     }
 
     fn end_line(&mut self) {
-        self.lines.push_back(OutLine {
+        let text = take(&mut self.rx_partial);
+        self.push_line(OutLine {
             source: Source::Rx,
-            text:   take(&mut self.rx_partial),
+            text,
         });
+    }
+
+    fn push_line(&mut self, line: OutLine) {
+        self.lines.push_back(line);
+        // A view scrolled into the past stays on what it shows. New lines land
+        // below the window, so the offset grows with them.
+        if self.scroll > 0 {
+            self.scroll += 1;
+        }
     }
 
     /// Input that reached the port, whoever sent it. It joins the same
@@ -81,7 +94,7 @@ impl Ui {
         if !self.rx_partial.is_empty() {
             self.end_line();
         }
-        self.lines.push_back(OutLine {
+        self.push_line(OutLine {
             source,
             text: text.to_string(),
         });
@@ -92,11 +105,24 @@ impl Ui {
         while self.lines.len() > MAX_LINES {
             self.lines.pop_front();
         }
+        self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
+    }
+
+    /// Wheel up: further into the past.
+    pub fn scroll_up(&mut self, n: usize) {
+        self.scroll = (self.scroll + n).min(self.lines.len().saturating_sub(1));
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll = self.scroll.saturating_sub(n);
     }
 
     pub fn take_input(&mut self) -> String {
         self.cursor = 0;
         self.hist_pos = None;
+        // Sending a command means watching for the reply, so the view snaps
+        // back to the live bottom.
+        self.scroll = 0;
         let text: String = take(&mut self.input).into_iter().collect();
         self.update_suggestion();
         text
@@ -224,6 +250,50 @@ mod tests {
         assert_eq!(ui.lines.len(), 1);
         assert_eq!(ui.lines[0].text, "hello");
         assert_eq!(ui.rx_partial, "wor");
+    }
+
+    #[test]
+    fn scroll_clamps_at_the_ends() {
+        let mut ui = Ui::default();
+        for i in 0..10 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.scroll_up(100);
+        assert_eq!(ui.scroll, 9);
+        ui.scroll_down(3);
+        assert_eq!(ui.scroll, 6);
+        ui.scroll_down(100);
+        assert_eq!(ui.scroll, 0);
+    }
+
+    // A person reading the past must not have the view yanked away by new
+    // output, while a view at the bottom keeps following it.
+    #[test]
+    fn new_lines_do_not_move_a_scrolled_view() {
+        let mut ui = Ui::default();
+        for i in 0..10 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.scroll_up(3);
+        ui.push_rx(b"more\n");
+        ui.push_echo(Origin::Typed, "sent");
+        assert_eq!(ui.scroll, 5);
+
+        ui.scroll_down(100);
+        ui.push_rx(b"even more\n");
+        assert_eq!(ui.scroll, 0);
+    }
+
+    #[test]
+    fn sending_input_pins_back_to_the_bottom() {
+        let mut ui = Ui::default();
+        for i in 0..10 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.scroll_up(5);
+        ui.set_input("reboot");
+        assert_eq!(ui.take_input(), "reboot");
+        assert_eq!(ui.scroll, 0);
     }
 
     #[test]
