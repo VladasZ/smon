@@ -90,6 +90,7 @@ Pass it back to read or wait for only what arrived since.
 | `serial_status` | `console` | `port`, `label`, `baud`, `connected`, `cursor`, `log`, `released`, `bridge` |
 | `log_roll` | `console`, `tag` (optional) | `path`, `started` of the new log segment |
 | `log_info` | `console` | `path`, `started` of the current segment |
+| `log_search` | `console`, `pattern`, `regex` (default false), `max_results` (default 100), `context` (default 0), `days` (optional) | `matches` newest first, `truncated`, `files_searched` |
 | `console_release` | `console` | status, once the device is really closed |
 | `console_hold` | `console` | status, after taking the device back |
 | `console_adopt` | `device`, `label`, `baud`, `eol`, `ring_kb` | status of the new console |
@@ -109,6 +110,26 @@ so put a console that needs one in the config file.
 it went. A run that calls it first can read its own output back from exactly
 that path instead of searching a day-sized file for its own lines. `tag` is
 added to the file name, a ticket id for example, and smon gives it no meaning.
+
+### Searching the logs
+
+`log_search` searches a console's log files on disk, so it reaches everything
+still retained under `log_retention_days`, not just the in-memory buffer that
+`serial_read` sees. The pattern is a substring by default, a regular expression
+with `regex: true`, and it must not be empty.
+
+Matches come newest first. Each carries the `file` it was found in, its 1-based
+`line` number there, and the matching log line as `text`, timestamp and
+direction marker included. `max_results` caps the reply keeping the newest
+matches, and `truncated` reports whether more existed beyond the cap. `context`
+returns that many surrounding lines with each match, as `before` and `after`.
+`days` narrows the search to segments started within that many days, where 1
+means today, and leaving it out searches everything retained.
+
+The search is line-based over the log records. One record holds one received
+chunk, and a device line can split across two records, so a substring that
+straddles a chunk boundary can be missed. When a search for a line that should
+exist comes back empty, search for a shorter piece of it.
 
 ### Handing the device over
 

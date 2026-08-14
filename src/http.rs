@@ -18,8 +18,8 @@ use crate::{
     console::Console,
     control::Control,
     mcp::{
-        AdoptReq, Cursor, ExpectReq, ExpectResult, ReadReq, ReadResult, RollReq, SendCtrlReq, SendReq,
-        SnapshotReq, Which, log_result, status_of,
+        AdoptReq, Cursor, ExpectReq, ExpectResult, LogSearchReq, ReadReq, ReadResult, RollReq, SendCtrlReq,
+        SendReq, SnapshotReq, Which, log_matcher, log_result, search_console_log, status_of,
     },
     registry::Registry,
 };
@@ -127,6 +127,13 @@ pub async fn call_http(
             let req: Which = parse_args(args)?;
             let info = resolve(&registry, req.console.as_deref())?.log_info();
             respond(log_result(&info))
+        }
+        "log_search" => {
+            let req: LogSearchReq = parse_args(args)?;
+            let matcher = log_matcher(&req.pattern, req.regex).map_err(bad_request)?;
+            let console = resolve(&registry, req.console.as_deref())?;
+            let result = search_console_log(&console, &matcher, &req).map_err(|e| internal(e.to_string()))?;
+            respond(result)
         }
         other => Err((StatusCode::NOT_FOUND, format!("unknown tool '{other}'"))),
     }

@@ -24,6 +24,7 @@ mod registry;
 mod remote;
 mod ring;
 mod runner;
+mod search;
 mod session;
 mod settings;
 mod tui;

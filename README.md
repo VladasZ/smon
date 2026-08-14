@@ -55,6 +55,7 @@ pane in cyan with a `>` prefix.
 - Up and Down recall previously sent commands.
 - The mouse wheel scrolls the output history, three lines per notch.
 - Tab, or Right at the end of the line, accepts the ghost autocomplete suggestion.
+- Ctrl+F searches the output history.
 - Ctrl key combos such as Ctrl+C pass straight through to the device.
 - Ctrl+Q quits.
 
@@ -69,6 +70,20 @@ with Enter snaps it there too.
 smon captures the mouse to receive wheel events, which also means the terminal's
 own text selection needs its usual override while smon runs, holding Shift while
 dragging in most terminals. Text selection without Shift is on the roadmap.
+
+### Searching
+
+Ctrl+F opens a search box in place of the input line. Typing edits the query,
+and every match in the scrollback is highlighted, with the count of matching
+lines shown on the box. Matching is a plain substring, case-insensitive until
+the query contains an uppercase letter. Enter or Up jumps the view to the next
+older match, Down to the next newer one, and Esc closes the search leaving the
+view where it is. While the search box is open, Ctrl combos other than Ctrl+Q
+do not reach the device.
+
+The search covers the scrollback held in memory. Everything older lives in the
+log files, which the `log_search` tool searches, see
+[docs/mcp.md](docs/mcp.md).
 
 If the device disappears mid-session, for example it reboots or the adapter is
 replugged, smon keeps the scrollback, marks the session as
@@ -101,6 +116,10 @@ client can start one at any time with `log_roll`, which returns the path. A run
 that does that first can read its own output back from exactly that file instead
 of picking its own lines out of a whole day. Segments older than
 `log_retention_days` are deleted, 30 days by default.
+
+The retained segments are searchable without leaving smon. The `log_search`
+tool takes a substring or a regex and returns matching lines newest first, with
+the file and line number each came from. See [docs/mcp.md](docs/mcp.md).
 
 Logs are stored in:
 
@@ -200,8 +219,8 @@ smon --eol none   # send nothing extra
 
 smon also serves a small [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint, so an agent or any MCP client can drive the serial console the same way
-you can at the TUI. It exposes tools such as `serial_send`, `serial_read`, and
-`serial_expect`.
+you can at the TUI. It exposes tools such as `serial_send`, `serial_read`,
+`serial_expect`, and `log_search`.
 
 It is always on and listens on `http://127.0.0.1:4123/mcp` over Streamable HTTP,
 loopback only. Change the bind with `--mcp`:

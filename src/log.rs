@@ -111,6 +111,34 @@ impl ConsoleLog {
         Ok(())
     }
 
+    /// This console's segment files, newest first, the currently written one
+    /// included. `days` keeps only segments started within that many days,
+    /// where 1 means today.
+    ///
+    /// # Errors
+    /// Returns an error if the log directory cannot be read.
+    pub fn segments(&self, days: Option<i64>) -> Result<Vec<PathBuf>> {
+        let prefix = format!("smon-{}-", self.stem);
+        let cutoff = days.map(|d| Local::now().date_naive() - chrono::Duration::days(d.max(1) - 1));
+        let entries = fs::read_dir(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
+        let mut files = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            let Some(date) = segment_date(&path, &prefix) else {
+                continue;
+            };
+            if cutoff.is_some_and(|c| date < c) {
+                continue;
+            }
+            files.push(path);
+        }
+        // The names carry the start stamp right after a shared prefix, so name
+        // order is time order.
+        files.sort();
+        files.reverse();
+        Ok(files)
+    }
+
     // Drop segments of this console older than the retention window. Only files
     // carrying this console's own prefix are considered, so a shared log
     // directory never loses another console's history.
@@ -306,6 +334,26 @@ mod tests {
         ConsoleLog::open_in(dir.clone(), "COM3", 30, None).unwrap();
 
         assert!(fresh.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn segments_list_this_console_newest_first() {
+        let dir = temp_dir("segments");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("smon-COM3-20260101-101010.log"), "old").unwrap();
+        fs::write(dir.join("smon-COM4-20260101-101010.log"), "other").unwrap();
+        fs::write(dir.join("notes.txt"), "junk").unwrap();
+        let log = ConsoleLog::open_in(dir.clone(), "COM3", 0, None).unwrap();
+
+        let all = log.segments(None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1], dir.join("smon-COM3-20260101-101010.log"));
+        assert_eq!(all[0], log.info().path);
+
+        // days: 1 keeps only segments started today, so the 2026 one drops out.
+        let today = log.segments(Some(1)).unwrap();
+        assert_eq!(today, vec![log.info().path]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -36,6 +36,8 @@ use crate::{
     control::Control,
     http::call_http,
     registry::{Adopt, Registry},
+    ring::Matcher,
+    search::search_files,
 };
 
 /// The consoles a request can reach, and the process serving them. Handlers
@@ -82,6 +84,10 @@ fn default_eol() -> String {
 
 fn default_ring_kb() -> usize {
     crate::ring::DEFAULT_RING_CAP / 1024
+}
+
+fn default_max_results() -> usize {
+    100
 }
 
 /// Named by every tool. Left out when only one console is open.
@@ -163,6 +169,28 @@ pub(crate) struct RollReq {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct LogSearchReq {
+    /// Console label or device path. Optional when only one console is open.
+    #[serde(default)]
+    pub console:     Option<String>,
+    /// Text to find, or a regular expression when `regex` is true.
+    pub pattern:     String,
+    /// Treat `pattern` as a regular expression. Default false.
+    #[serde(default)]
+    pub regex:       bool,
+    /// Most matches to return, keeping the newest. Default 100.
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    /// Lines of surrounding context returned with each match. Default 0.
+    #[serde(default)]
+    pub context:     usize,
+    /// Only search log segments started within this many days, where 1 means
+    /// today. Omit to search everything retained.
+    #[serde(default)]
+    pub days:        Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct AdoptReq {
     /// The serial device to take over, for example /dev/ttyUSB1 or COM7.
     pub device:  String,
@@ -238,6 +266,32 @@ pub(crate) struct StatusResult {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LogMatch {
+    /// The log file the match is in.
+    pub file:   String,
+    /// 1-based line number in that file.
+    pub line:   u64,
+    /// The matching log line, carrying its timestamp and direction marker.
+    pub text:   String,
+    /// Lines just before the match, present when context was asked for.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<String>,
+    /// Lines just after the match, present when context was asked for.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after:  Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LogSearchResult {
+    /// Matching lines, newest first.
+    pub matches:        Vec<LogMatch>,
+    /// True when more matches exist than max_results allowed to return.
+    pub truncated:      bool,
+    /// How many log segments were searched.
+    pub files_searched: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct LogResult {
     /// The log segment now being written.
     pub path:    String,
@@ -263,6 +317,43 @@ pub(crate) fn log_result(info: &crate::log::LogInfo) -> LogResult {
         path:    info.path.display().to_string(),
         started: info.started.format("%Y-%m-%d %H:%M:%S").to_string(),
     }
+}
+
+/// An empty pattern would match every line, which is never what a caller
+/// wants, so it is rejected like an invalid regex.
+pub(crate) fn log_matcher(pattern: &str, regex: bool) -> Result<Matcher, String> {
+    if pattern.is_empty() {
+        return Err("pattern must not be empty".to_string());
+    }
+    Matcher::build(pattern, regex)
+}
+
+/// The log search shared by the MCP tool and the HTTP side door.
+///
+/// # Errors
+/// Returns an error if the log directory or a segment cannot be read.
+pub(crate) fn search_console_log(
+    console: &Arc<Console>,
+    matcher: &Matcher,
+    req: &LogSearchReq,
+) -> Result<LogSearchResult> {
+    let files = console.log_segments(req.days)?;
+    let found = search_files(&files, matcher, req.max_results, req.context)?;
+    Ok(LogSearchResult {
+        matches:        found
+            .matches
+            .into_iter()
+            .map(|m| LogMatch {
+                file:   m.file.display().to_string(),
+                line:   m.line,
+                text:   m.text,
+                before: m.before,
+                after:  m.after,
+            })
+            .collect(),
+        truncated:      found.truncated,
+        files_searched: found.files,
+    })
 }
 
 /// Cloned per session by the transport. Every clone shares the same registry.
@@ -405,6 +496,21 @@ impl Server {
     async fn log_info(&self, Parameters(req): Parameters<Which>) -> Result<Json<LogResult>, McpError> {
         let info = self.console(req.console.as_deref())?.log_info();
         Ok(Json(log_result(&info)))
+    }
+
+    #[tool(
+        description = "Search a console's log files on disk, covering everything retained, not just the \
+                       in-memory buffer. Substring by default, regex optional. Matches come newest first."
+    )]
+    async fn log_search(
+        &self,
+        Parameters(req): Parameters<LogSearchReq>,
+    ) -> Result<Json<LogSearchResult>, McpError> {
+        let matcher = log_matcher(&req.pattern, req.regex).map_err(|e| McpError::invalid_params(e, None))?;
+        let console = self.console(req.console.as_deref())?;
+        search_console_log(&console, &matcher, &req)
+            .map(Json)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 }
 

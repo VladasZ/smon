@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
-use crate::ui::{OutLine, Source, Ui};
+use crate::ui::{OutLine, Source, Ui, smart_find};
 
 pub fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui, title: &str, connected: bool) -> Result<()>
 where B::Error: std::error::Error + Send + Sync + 'static {
@@ -20,6 +20,11 @@ where B::Error: std::error::Error + Send + Sync + 'static {
     } else {
         format!(" {title}  --  disconnected, retrying ")
     };
+    let query = ui.search_query();
+    let search = ui
+        .search
+        .as_ref()
+        .map(|s| (s.query.iter().collect::<String>(), ui.search_count()));
 
     terminal.draw(|frame| {
         let chunks = Layout::default()
@@ -32,7 +37,7 @@ where B::Error: std::error::Error + Send + Sync + 'static {
             .border_type(BorderType::Rounded)
             .border_style(border)
             .title(Line::from(title))
-            .title(Line::from(" ctrl+q: quit ").right_aligned());
+            .title(Line::from(" ctrl+f: search  ctrl+q: quit ").right_aligned());
         let out_inner = out_block.inner(out_area);
         frame.render_widget(out_block, out_area);
 
@@ -54,7 +59,7 @@ where B::Error: std::error::Error + Send + Sync + 'static {
             if rows >= height {
                 break;
             }
-            let styled = style_line(line);
+            let styled = style_line(line, query.as_deref());
             rows += wrapped_rows(&styled, out_inner.width);
             tail.push(styled);
         }
@@ -63,7 +68,7 @@ where B::Error: std::error::Error + Send + Sync + 'static {
         // instead of draining off the top.
         while rows < height && scroll > 0 {
             scroll -= 1;
-            let styled = style_line(&ui.lines[ui.lines.len() - 1 - scroll]);
+            let styled = style_line(&ui.lines[ui.lines.len() - 1 - scroll], query.as_deref());
             rows += wrapped_rows(&styled, out_inner.width);
             tail.insert(0, styled);
             if scroll == 0 && rows < height && !ui.rx_partial.is_empty() {
@@ -103,6 +108,29 @@ where B::Error: std::error::Error + Send + Sync + 'static {
         }
 
         let in_area = chunks[1];
+        // While the search prompt is open it replaces the input line, and the
+        // yellow border says keystrokes are going to the search, not the device.
+        if let Some((typed, count)) = &search {
+            let in_block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(Color::Yellow))
+                .title(Line::from(" search  --  enter: older  down: newer  esc: close "))
+                .title(Line::from(format!(" {count} lines ")).right_aligned());
+            let in_inner = in_block.inner(in_area);
+            frame.render_widget(in_block, in_area);
+            let avail = in_inner.width.max(1) as usize;
+            let len = typed.chars().count();
+            let scroll_x = len.saturating_sub(avail.saturating_sub(1));
+            frame.render_widget(
+                Paragraph::new(typed.clone()).scroll((0, scroll_x as u16)),
+                in_inner,
+            );
+            frame.set_cursor_position(Position {
+                x: in_inner.x + (len - scroll_x) as u16,
+                y: in_inner.y,
+            });
+            return;
+        }
         let in_block = Block::bordered().border_type(BorderType::Rounded).border_style(border);
         let in_inner = in_block.inner(in_area);
         frame.render_widget(in_block, in_area);
@@ -141,14 +169,34 @@ where B::Error: std::error::Error + Send + Sync + 'static {
     Ok(())
 }
 
-fn style_line(line: &OutLine) -> Line<'static> {
-    let (text, style) = match line.source {
-        Source::Rx => (line.text.clone(), Style::default()),
-        Source::Local => (format!("> {}", line.text), Style::new().fg(Color::Cyan)),
-        Source::Agent => (format!(">> {}", line.text), Style::new().fg(Color::Magenta)),
-        Source::System => (format!("-- {}", line.text), Style::new().fg(Color::DarkGray)),
+fn style_line(line: &OutLine, query: Option<&str>) -> Line<'static> {
+    let (prefix, style) = match line.source {
+        Source::Rx => ("", Style::default()),
+        Source::Local => ("> ", Style::new().fg(Color::Cyan)),
+        Source::Agent => (">> ", Style::new().fg(Color::Magenta)),
+        Source::System => ("-- ", Style::new().fg(Color::DarkGray)),
     };
-    Line::styled(text, style)
+    let ranges = query.map_or_else(Vec::new, |q| smart_find(&line.text, q));
+    if ranges.is_empty() {
+        return Line::styled(format!("{prefix}{}", line.text), style);
+    }
+    let highlight = Style::new().fg(Color::Black).bg(Color::Yellow);
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix, style));
+    }
+    let mut pos = 0;
+    for (start, end) in ranges {
+        if start > pos {
+            spans.push(Span::styled(line.text[pos..start].to_string(), style));
+        }
+        spans.push(Span::styled(line.text[start..end].to_string(), highlight));
+        pos = end;
+    }
+    if pos < line.text.len() {
+        spans.push(Span::styled(line.text[pos..].to_string(), style));
+    }
+    Line::from(spans)
 }
 
 // Ask the paragraph itself how many rows the line wraps to at this width. A
@@ -250,6 +298,38 @@ mod tests {
             "expected line 29 at the bottom, got: {row}"
         );
         assert_eq!(ui.scroll, 10);
+    }
+
+    // The person must see where their keystrokes go, so the search prompt takes
+    // over the bottom box, and the matches must be visibly marked in the pane.
+    #[test]
+    fn search_prompt_replaces_the_input_line_and_highlights_matches() {
+        let (width, height) = (60u16, 12u16);
+        let mut ui = numbered_ui(5);
+        ui.push_rx(b"an error happened\n");
+        ui.open_search();
+        for c in "error".chars() {
+            ui.search_insert(c);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        let input_row = text_row(&terminal, width, height - 2);
+        assert!(input_row.contains("error"), "query not shown: {input_row}");
+
+        let buf = terminal.backend().buffer();
+        let mut highlighted = false;
+        for y in 1..height - 4 {
+            let row = text_row(&terminal, width, y);
+            if row.contains("happened") {
+                let idx = row.find("error").unwrap();
+                let cell = buf.cell((1 + idx as u16, y)).unwrap();
+                assert_eq!(cell.bg, Color::Yellow, "match not highlighted in: {row}");
+                highlighted = true;
+            }
+        }
+        assert!(highlighted, "the matching line never rendered");
     }
 
     // Scrolling far past the top must stop at the oldest full screen, not leave

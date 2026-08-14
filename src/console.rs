@@ -6,6 +6,7 @@
 //! the runner to write, so the port is only ever written from one place.
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -278,6 +279,14 @@ impl Console {
     /// Returns an error if the new segment cannot be created.
     pub fn log_roll(&self, tag: Option<&str>) -> Result<LogInfo> {
         self.log.lock().unwrap().roll(tag)
+    }
+
+    /// This console's log segment files, newest first.
+    ///
+    /// # Errors
+    /// Returns an error if the log directory cannot be read.
+    pub fn log_segments(&self, days: Option<i64>) -> Result<Vec<PathBuf>> {
+        self.log.lock().unwrap().segments(days)
     }
 
     /// Queue input without waiting for the write to land. This is the path a

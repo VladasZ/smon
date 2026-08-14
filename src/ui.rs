@@ -34,6 +34,11 @@ pub struct OutLine {
     pub text:   String,
 }
 
+/// The query typed into the search prompt while it is open.
+pub struct Search {
+    pub query: Vec<char>,
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub lines:      VecDeque<OutLine>,
@@ -46,6 +51,8 @@ pub struct Ui {
     /// Complete lines between the bottom of the view and the newest line. Zero
     /// means pinned to the live bottom.
     pub scroll:     usize,
+    /// The scrollback search prompt, open while this is Some.
+    pub search:     Option<Search>,
 }
 
 impl Ui {
@@ -220,6 +227,107 @@ impl Ui {
             self.clear_input();
         }
     }
+
+    pub fn open_search(&mut self) {
+        if self.search.is_none() {
+            self.search = Some(Search { query: Vec::new() });
+        }
+    }
+
+    pub fn close_search(&mut self) {
+        self.search = None;
+    }
+
+    pub fn search_insert(&mut self, c: char) {
+        if let Some(search) = &mut self.search {
+            search.query.push(c);
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(search) = &mut self.search {
+            search.query.pop();
+        }
+    }
+
+    /// The query to match with, or None while the prompt is closed or empty.
+    pub fn search_query(&self) -> Option<String> {
+        let query: String = self.search.as_ref()?.query.iter().collect();
+        if query.is_empty() { None } else { Some(query) }
+    }
+
+    /// How many scrollback lines match the query.
+    pub fn search_count(&self) -> usize {
+        let Some(query) = self.search_query() else {
+            return 0;
+        };
+        self.lines.iter().filter(|l| !smart_find(&l.text, &query).is_empty()).count()
+    }
+
+    // The line the view's bottom row shows. A jump puts the match there, so it
+    // is also where the walk continues from.
+    fn view_bottom(&self) -> usize {
+        self.lines.len().saturating_sub(1).saturating_sub(self.scroll)
+    }
+
+    /// Jump the view to the nearest matching line above the current position.
+    pub fn search_older(&mut self) {
+        let Some(query) = self.search_query() else {
+            return;
+        };
+        for idx in (0..self.view_bottom()).rev() {
+            if !smart_find(&self.lines[idx].text, &query).is_empty() {
+                self.scroll = self.lines.len() - 1 - idx;
+                return;
+            }
+        }
+    }
+
+    /// Jump the view to the nearest matching line below the current position.
+    pub fn search_newer(&mut self) {
+        let Some(query) = self.search_query() else {
+            return;
+        };
+        for idx in self.view_bottom() + 1..self.lines.len() {
+            if !smart_find(&self.lines[idx].text, &query).is_empty() {
+                self.scroll = self.lines.len() - 1 - idx;
+                return;
+            }
+        }
+    }
+}
+
+/// Byte ranges of every occurrence of `query` in `hay`. Case-insensitive until
+/// the query carries an uppercase letter, then exact, like less and modern
+/// editors.
+pub fn smart_find(hay: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let needle: Vec<char> = query.chars().collect();
+    let chars: Vec<(usize, char)> = hay.char_indices().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= chars.len() {
+        if needle.iter().zip(&chars[i..]).all(|(q, (_, h))| char_eq(*h, *q, exact)) {
+            let start = chars[i].0;
+            let end = chars.get(i + needle.len()).map_or(hay.len(), |(b, _)| *b);
+            found.push((start, end));
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+fn char_eq(a: char, b: char, exact: bool) -> bool {
+    if exact {
+        a == b
+    } else {
+        a.to_lowercase().eq(b.to_lowercase())
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +448,81 @@ mod tests {
         assert!(matches!(ui.lines[0].source, Source::Local));
         assert!(matches!(ui.lines[1].source, Source::Agent));
         assert!(matches!(ui.lines[2].source, Source::Local));
+    }
+
+    #[test]
+    fn smart_find_ignores_case_until_the_query_has_an_uppercase() {
+        assert_eq!(smart_find("Boot OK boot", "boot"), vec![(0, 4), (8, 12)]);
+        assert_eq!(smart_find("Boot OK boot", "Boot"), vec![(0, 4)]);
+        assert_eq!(smart_find("nothing here", "boot"), Vec::new());
+        assert_eq!(smart_find("anything", ""), Vec::new());
+    }
+
+    fn searching_ui(query: &str) -> Ui {
+        let mut ui = Ui::default();
+        for i in 0..10 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.push_rx(b"error one\n");
+        for i in 10..20 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.push_rx(b"error two\n");
+        for i in 20..25 {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.open_search();
+        for c in query.chars() {
+            ui.search_insert(c);
+        }
+        ui
+    }
+
+    // Walking older puts each match at the bottom of the view, and walking
+    // newer comes back the same way.
+    #[test]
+    fn search_walks_older_and_newer_matches() {
+        let mut ui = searching_ui("error");
+        // 27 lines total: indices 10 and 21 match.
+        ui.search_older();
+        assert_eq!(ui.scroll, 27 - 1 - 21);
+        ui.search_older();
+        assert_eq!(ui.scroll, 27 - 1 - 10);
+        // No older match, the view stays put.
+        ui.search_older();
+        assert_eq!(ui.scroll, 27 - 1 - 10);
+        ui.search_newer();
+        assert_eq!(ui.scroll, 27 - 1 - 21);
+        ui.search_newer();
+        assert_eq!(ui.scroll, 27 - 1 - 21);
+    }
+
+    #[test]
+    fn search_counts_matching_lines() {
+        let ui = searching_ui("error");
+        assert_eq!(ui.search_count(), 2);
+        let ui = searching_ui("nothing-like-this");
+        assert_eq!(ui.search_count(), 0);
+    }
+
+    // An empty query must not move the view, or opening the prompt and hitting
+    // Enter would jump somewhere meaningless.
+    #[test]
+    fn empty_query_does_not_navigate() {
+        let mut ui = searching_ui("");
+        ui.search_older();
+        assert_eq!(ui.scroll, 0);
+        assert_eq!(ui.search_query(), None);
+    }
+
+    #[test]
+    fn closing_and_reopening_search_keeps_nothing_stale() {
+        let mut ui = searching_ui("error");
+        ui.close_search();
+        assert!(ui.search.is_none());
+        assert_eq!(ui.search_count(), 0);
+        ui.open_search();
+        assert_eq!(ui.search_query(), None);
     }
 
     // A partial line still on the wire must be closed before an echo goes in,

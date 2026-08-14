@@ -88,6 +88,20 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
         dirty = true;
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl+F belongs to the search, so it is the one control combo that
+        // never reaches the device.
+        if ctrl && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F')) {
+            if ui.search.is_some() {
+                ui.close_search();
+            } else {
+                ui.open_search();
+            }
+            continue;
+        }
+        if ui.search.is_some() {
+            search_key(&mut ui, &key);
+            continue;
+        }
         match key.code {
             KeyCode::Char(c) if ctrl => {
                 if let Err(e) = attached.send_ctrl(c) {
@@ -136,6 +150,22 @@ fn is_quit(key: &KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
 }
 
+// Keys while the search prompt is open. Control combos are deliberately inert
+// here, so a stray Ctrl+C cannot reach the device mid-search.
+fn search_key(ui: &mut Ui, key: &KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => ui.close_search(),
+        KeyCode::Enter | KeyCode::Up => ui.search_older(),
+        KeyCode::Down => ui.search_newer(),
+        KeyCode::Backspace => ui.search_backspace(),
+        KeyCode::Char(c) => ui.search_insert(c),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyEvent;
@@ -161,5 +191,29 @@ mod tests {
     fn other_control_keys_pass_through_not_quit() {
         assert!(!is_quit(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert!(!is_quit(&key(KeyCode::Char(']'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn search_keys_edit_the_query_and_esc_closes() {
+        let mut ui = Ui::default();
+        ui.open_search();
+        search_key(&mut ui, &key(KeyCode::Char('o'), KeyModifiers::NONE));
+        search_key(&mut ui, &key(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(ui.search_query().as_deref(), Some("ok"));
+        search_key(&mut ui, &key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ui.search_query().as_deref(), Some("o"));
+        search_key(&mut ui, &key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ui.search.is_none());
+    }
+
+    // A control combo typed mid-search must not land in the query and must not
+    // go anywhere else either.
+    #[test]
+    fn control_combos_are_inert_while_searching() {
+        let mut ui = Ui::default();
+        ui.open_search();
+        search_key(&mut ui, &key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(ui.search_query(), None);
+        assert!(ui.search.is_some());
     }
 }
