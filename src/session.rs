@@ -7,11 +7,14 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ratatui::DefaultTerminal;
 
 use crate::{
     attached::{Attached, Polled},
+    clipboard::Clipboard,
     config::Config,
     console::ConsoleEvent,
     control::Control,
@@ -31,6 +34,7 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
     // from what it already heard rather than an empty screen.
     ui.push_rx(attached.backlog().as_bytes());
     let title = attached.title();
+    let mut clipboard = Clipboard::new();
     let mut dirty = true;
 
     loop {
@@ -54,6 +58,10 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
             dirty = true;
         }
 
+        if ui.flash_expired() {
+            dirty = true;
+        }
+
         // Redraw only when state changed. An unconditional draw on every 16ms
         // tick re-wrapped the scrollback at 60 fps and burned most of a core.
         if dirty {
@@ -70,6 +78,13 @@ pub fn run(terminal: &mut DefaultTerminal, attached: &mut dyn Attached, control:
                 match mouse.kind {
                     MouseEventKind::ScrollUp => ui.scroll_up(WHEEL_LINES),
                     MouseEventKind::ScrollDown => ui.scroll_down(WHEEL_LINES),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(text) = ui.click(mouse.column, mouse.row)
+                            && let Err(e) = clipboard.copy(&text)
+                        {
+                            ui.push_system(&e);
+                        }
+                    }
                     _ => continue,
                 }
                 dirty = true;

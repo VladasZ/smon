@@ -54,6 +54,7 @@ pane in cyan with a `>` prefix.
 - Enter sends the current line plus the line ending.
 - Up and Down recall previously sent commands.
 - The mouse wheel scrolls the output history, three lines per notch.
+- A left click on a line in the output pane copies that line to the clipboard.
 - Tab, or Right at the end of the line, accepts the ghost autocomplete suggestion.
 - Ctrl+F searches the output history.
 - Ctrl key combos such as Ctrl+C pass straight through to the device.
@@ -70,6 +71,16 @@ with Enter snaps it there too.
 smon captures the mouse to receive wheel events, which also means the terminal's
 own text selection needs its usual override while smon runs, holding Shift while
 dragging in most terminals. Text selection without Shift is on the roadmap.
+
+### Copying a line
+
+A left click on any row of the output pane copies the whole logical line under
+it, a wrapped line included, and the line flashes for a moment to show the click
+landed. An echoed command is copied without its `>` prefix, so it can be pasted
+back as is. The copy goes two ways at once, an OSC 52 escape so the terminal on
+your side sets its own clipboard, which is what makes it work over ssh, and the
+OS clipboard directly for terminals without OSC 52 support. Only both failing
+prints an error in the pane.
 
 ### Searching
 

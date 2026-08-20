@@ -5,12 +5,12 @@ use ratatui::{
     Terminal,
     backend::Backend,
     layout::{Constraint, Direction, Layout, Position},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
-use crate::ui::{OutLine, Source, Ui, smart_find};
+use crate::ui::{ClickTarget, OutLine, Pane, Source, Ui, smart_find};
 
 pub fn draw<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui, title: &str, connected: bool) -> Result<()>
 where B::Error: std::error::Error + Send + Sync + 'static {
@@ -49,40 +49,85 @@ where B::Error: std::error::Error + Send + Sync + 'static {
         // used to burn most of a core.
         let mut scroll = ui.scroll.min(ui.lines.len().saturating_sub(1));
         let mut tail: Vec<Line> = Vec::new();
+        let mut targets: Vec<ClickTarget> = Vec::new();
+        let mut row_counts: Vec<usize> = Vec::new();
         let mut rows = 0usize;
         if scroll == 0 && !ui.rx_partial.is_empty() {
             let line = Line::from(ui.rx_partial.clone());
-            rows += wrapped_rows(&line, out_inner.width);
+            let count = wrapped_rows(&line, out_inner.width);
+            rows += count;
             tail.push(line);
+            targets.push(ClickTarget::Partial);
+            row_counts.push(count);
         }
-        for line in ui.lines.iter().rev().skip(scroll) {
+        for (idx, line) in ui.lines.iter().enumerate().rev().skip(scroll) {
             if rows >= height {
                 break;
             }
             let styled = style_line(line, query.as_deref());
-            rows += wrapped_rows(&styled, out_inner.width);
+            let count = wrapped_rows(&styled, out_inner.width);
+            rows += count;
             tail.push(styled);
+            targets.push(ClickTarget::Line(ui.line_number(idx)));
+            row_counts.push(count);
         }
         // Scrolled past the top: pull lines back in from below the window until
         // the pane is full again, so the view stops at the oldest full screen
         // instead of draining off the top.
         while rows < height && scroll > 0 {
             scroll -= 1;
-            let styled = style_line(&ui.lines[ui.lines.len() - 1 - scroll], query.as_deref());
-            rows += wrapped_rows(&styled, out_inner.width);
+            let idx = ui.lines.len() - 1 - scroll;
+            let styled = style_line(&ui.lines[idx], query.as_deref());
+            let count = wrapped_rows(&styled, out_inner.width);
+            rows += count;
             tail.insert(0, styled);
+            targets.insert(0, ClickTarget::Line(ui.line_number(idx)));
+            row_counts.insert(0, count);
             if scroll == 0 && rows < height && !ui.rx_partial.is_empty() {
                 let line = Line::from(ui.rx_partial.clone());
-                rows += wrapped_rows(&line, out_inner.width);
+                let count = wrapped_rows(&line, out_inner.width);
+                rows += count;
                 tail.insert(0, line);
+                targets.insert(0, ClickTarget::Partial);
+                row_counts.insert(0, count);
             }
         }
         ui.scroll = scroll;
         let shown = tail.len();
         tail.reverse();
+        targets.reverse();
+        row_counts.reverse();
+
+        if let Some(flash) = ui.flash_target()
+            && let Some(i) = targets.iter().position(|t| *t == flash)
+        {
+            tail[i].style = Style::new().add_modifier(Modifier::REVERSED);
+        }
+
+        let hidden = rows.saturating_sub(height);
+
+        // Remember what each visible row shows, so a click can be mapped back
+        // to its line. Rows of one logical line all map to it, which is what
+        // makes a click on any row of a wrapped line copy the whole line.
+        let mut click_map = vec![None; height];
+        let mut row = 0usize;
+        for (target, count) in targets.iter().zip(&row_counts) {
+            for _ in 0..*count {
+                if let Some(cell) = row.checked_sub(hidden).and_then(|r| click_map.get_mut(r)) {
+                    *cell = Some(*target);
+                }
+                row += 1;
+            }
+        }
+        ui.click_map = click_map;
+        ui.pane = Pane {
+            x:     out_inner.x,
+            y:     out_inner.y,
+            width: out_inner.width,
+        };
 
         let paragraph = Paragraph::new(Text::from(tail)).wrap(Wrap { trim: false });
-        let para_scroll = rows.saturating_sub(height).min(u16::MAX as usize) as u16;
+        let para_scroll = hidden.min(u16::MAX as usize) as u16;
         frame.render_widget(paragraph.scroll((para_scroll, 0)), out_inner);
 
         // Lines left out of the tail wrap to at least one row each, which bounds the
@@ -330,6 +375,87 @@ mod tests {
             }
         }
         assert!(highlighted, "the matching line never rendered");
+    }
+
+    #[test]
+    fn click_copies_the_line_under_the_cursor() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(5);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        assert_eq!(ui.click(1, 1).as_deref(), Some("line 0"));
+        assert_eq!(ui.click(1, 5).as_deref(), Some("line 4"));
+        // Below the content and on the border there is nothing to copy.
+        assert_eq!(ui.click(1, 6), None);
+        assert_eq!(ui.click(0, 1), None);
+    }
+
+    #[test]
+    fn click_on_any_row_of_a_wrapped_line_copies_the_whole_line() {
+        let (width, height) = (20u16, 12u16);
+        let long = "a".repeat(30);
+        let mut ui = Ui::default();
+        ui.push_rx(format!("{long}\n").as_bytes());
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        assert_eq!(ui.click(1, 1).as_deref(), Some(long.as_str()));
+        assert_eq!(ui.click(1, 2).as_deref(), Some(long.as_str()));
+    }
+
+    // The prefix is drawn, not stored, and a clicked command is for reuse, so
+    // the copy must be the bare command.
+    #[test]
+    fn click_on_an_echoed_line_copies_the_command_without_the_prefix() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = Ui::default();
+        ui.push_echo(crate::console::Origin::Typed, "version");
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        assert!(text_row(&terminal, width, 1).contains("> version"));
+        assert_eq!(ui.click(1, 1).as_deref(), Some("version"));
+    }
+
+    #[test]
+    fn click_reaches_a_partial_line_still_on_the_wire() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(3);
+        ui.push_rx(b"partial");
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        assert_eq!(ui.click(1, 4).as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn click_maps_through_a_scrolled_view() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(40);
+        ui.scroll = 10;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        let last_text_row = height - 3 - 1 - 1;
+        assert_eq!(ui.click(1, last_text_row).as_deref(), Some("line 29"));
+    }
+
+    // The person needs to see the click landed, so the copied line must be
+    // visibly marked on the next frame.
+    #[test]
+    fn a_clicked_line_is_drawn_highlighted() {
+        let (width, height) = (40u16, 12u16);
+        let mut ui = numbered_ui(3);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        assert_eq!(ui.click(1, 2).as_deref(), Some("line 1"));
+        draw(&mut terminal, &mut ui, "COM11 @ 115200", true).unwrap();
+
+        let buf = terminal.backend().buffer();
+        assert!(buf.cell((1, 2)).unwrap().modifier.contains(Modifier::REVERSED));
+        assert!(!buf.cell((1, 1)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     // Scrolling far past the top must stop at the oldest full screen, not leave

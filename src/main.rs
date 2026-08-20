@@ -9,6 +9,7 @@ mod attached;
 mod bridge;
 mod cli;
 mod client;
+mod clipboard;
 mod config;
 mod console;
 mod control;

@@ -1,6 +1,10 @@
 //! What the person at the terminal sees: the scrollback and the input line.
 
-use std::{collections::VecDeque, mem::take};
+use std::{
+    collections::VecDeque,
+    mem::take,
+    time::{Duration, Instant},
+};
 
 use nucleo_matcher::{
     Config as FuzzyConfig, Matcher, Utf32String,
@@ -34,6 +38,29 @@ pub struct OutLine {
     pub text:   String,
 }
 
+/// What a screen row of the output pane shows, recorded at draw time so a
+/// click can be mapped back to the logical line under it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// An absolute line number counted from session start. The buffer cap can
+    /// trim old lines between the draw and the click, which would shift a
+    /// plain index onto a neighboring line.
+    Line(u64),
+    Partial,
+}
+
+/// Where the output pane sat on screen at the last draw. Height is the length
+/// of the click map.
+#[derive(Default, Clone, Copy)]
+pub struct Pane {
+    pub x:     u16,
+    pub y:     u16,
+    pub width: u16,
+}
+
+/// How long a copied line stays highlighted.
+const FLASH: Duration = Duration::from_millis(200);
+
 /// The query typed into the search prompt while it is open.
 pub struct Search {
     pub query: Vec<char>,
@@ -53,6 +80,13 @@ pub struct Ui {
     pub scroll:     usize,
     /// The scrollback search prompt, open while this is Some.
     pub search:     Option<Search>,
+    /// Per screen row of the output pane, what the last draw put there.
+    pub click_map:  Vec<Option<ClickTarget>>,
+    pub pane:       Pane,
+    /// The line a click just copied, highlighted until the moment passes.
+    pub flash:      Option<(ClickTarget, Instant)>,
+    /// How many lines the cap has trimmed off the front, ever.
+    pub trimmed:    u64,
 }
 
 impl Ui {
@@ -111,8 +145,50 @@ impl Ui {
     fn cap_lines(&mut self) {
         while self.lines.len() > MAX_LINES {
             self.lines.pop_front();
+            self.trimmed += 1;
         }
         self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
+    }
+
+    /// The absolute number of a line at this index in the buffer.
+    pub fn line_number(&self, idx: usize) -> u64 {
+        self.trimmed + idx as u64
+    }
+
+    /// The text of the line under a click, or None off the output pane. The
+    /// clicked line is marked for the flash highlight.
+    pub fn click(&mut self, x: u16, y: u16) -> Option<String> {
+        let pane = self.pane;
+        if x < pane.x || x >= pane.x + pane.width || y < pane.y {
+            return None;
+        }
+        let target = (*self.click_map.get(usize::from(y - pane.y))?)?;
+        let text = match target {
+            ClickTarget::Line(number) => {
+                let idx = usize::try_from(number.checked_sub(self.trimmed)?).ok()?;
+                self.lines.get(idx)?.text.clone()
+            }
+            ClickTarget::Partial => self.rx_partial.clone(),
+        };
+        self.flash = Some((target, Instant::now()));
+        Some(text)
+    }
+
+    /// The line to draw highlighted, while the flash lasts.
+    pub fn flash_target(&self) -> Option<ClickTarget> {
+        self.flash.map(|(target, _)| target)
+    }
+
+    /// Clears a flash whose moment has passed. True means the screen needs a
+    /// redraw to drop the highlight.
+    pub fn flash_expired(&mut self) -> bool {
+        match self.flash {
+            Some((_, at)) if at.elapsed() >= FLASH => {
+                self.flash = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Wheel up: further into the past.
@@ -523,6 +599,33 @@ mod tests {
         assert_eq!(ui.search_count(), 0);
         ui.open_search();
         assert_eq!(ui.search_query(), None);
+    }
+
+    // The cap can trim lines off the front between the draw that built the
+    // click map and the click itself. A plain buffer index would then name a
+    // neighboring line, so targets carry absolute line numbers.
+    #[test]
+    fn click_targets_stay_on_their_line_across_a_front_trim() {
+        let mut ui = Ui::default();
+        for i in 0..MAX_LINES {
+            ui.push_rx(format!("line {i}\n").as_bytes());
+        }
+        ui.pane = Pane {
+            x:     0,
+            y:     0,
+            width: 10,
+        };
+        ui.click_map = vec![Some(ClickTarget::Line(ui.line_number(5)))];
+        for i in 0..3 {
+            ui.push_rx(format!("new {i}\n").as_bytes());
+        }
+
+        assert_eq!(ui.click(0, 0).as_deref(), Some("line 5"));
+        assert!(ui.flash_target().is_some());
+
+        // A target whose line was trimmed away has nothing left to copy.
+        ui.click_map = vec![Some(ClickTarget::Line(0))];
+        assert_eq!(ui.click(0, 0), None);
     }
 
     // A partial line still on the wire must be closed before an echo goes in,
